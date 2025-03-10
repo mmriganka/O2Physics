@@ -37,8 +37,8 @@ class FemtoDreamMath
   /// \param mass1 Mass of particle 1
   /// \param part2 Particle 2
   /// \param mass2 Mass of particle 2
-  template <typename T>
-  static float getkstar(const T& part1, const float mass1, const T& part2, const float mass2)
+  template <typename T1, typename T2>
+  static float getkstar(const T1& part1, const float mass1, const T2& part2, const float mass2)
   {
     const ROOT::Math::PtEtaPhiMVector vecpart1(part1.pt(), part1.eta(), part1.phi(), mass1);
     const ROOT::Math::PtEtaPhiMVector vecpart2(part2.pt(), part2.eta(), part2.phi(), mass2);
@@ -116,8 +116,8 @@ class FemtoDreamMath
   /// \param mass1 Mass of particle 1
   /// \param part2 Particle 2
   /// \param mass2 Mass of particle 2
-  template <typename T>
-  static float getkT(const T& part1, const float mass1, const T& part2, const float mass2)
+  template <typename T1, typename T2>
+  static float getkT(const T1& part1, const float mass1, const T2& part2, const float mass2)
   {
     const ROOT::Math::PtEtaPhiMVector vecpart1(part1.pt(), part1.eta(), part1.phi(), mass1);
     const ROOT::Math::PtEtaPhiMVector vecpart2(part2.pt(), part2.eta(), part2.phi(), mass2);
@@ -131,10 +131,23 @@ class FemtoDreamMath
   /// \param mass1 Mass of particle 1
   /// \param part2 Particle 2
   /// \param mass2 Mass of particle 2
-  template <typename T>
-  static float getmT(const T& part1, const float mass1, const T& part2, const float mass2)
+  template <typename T1, typename T2>
+  static float getmT(const T1& part1, const float mass1, const T2& part2, const float mass2)
   {
     return std::sqrt(std::pow(getkT(part1, mass1, part2, mass2), 2.) + std::pow(0.5 * (mass1 + mass2), 2.));
+  }
+
+  template <typename T1>
+  static float getInvMassCascade(const T1& trackpos, const float masspos, const T1& trackneg, const float massneg, const T1& trackbach, const float massbach, const float massv0)
+  {
+    // calculate the invariant mass
+    const ROOT::Math::PtEtaPhiMVector posDaug(trackpos.pt(), trackpos.eta(), trackpos.phi(), masspos);
+    const ROOT::Math::PtEtaPhiMVector negDaug(trackneg.pt(), trackneg.eta(), trackneg.phi(), massneg);
+    const ROOT::Math::PtEtaPhiMVector bachDaug(trackbach.pt(), trackbach.eta(), trackbach.phi(), massbach);
+    const ROOT::Math::PxPyPzMVector v0(posDaug.Px() + negDaug.Px(), posDaug.Py() + negDaug.Py(), posDaug.Pz() + negDaug.Pz(), massv0);
+    const ROOT::Math::PxPyPzMVector casc = v0 + bachDaug;
+
+    return casc.M();
   }
 };
 

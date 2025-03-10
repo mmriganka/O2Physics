@@ -12,6 +12,8 @@
 #ifndef PWGCF_TWOPARTICLECORRELATIONS_TABLEPRODUCER_IDENTIFIEDBFFILTER_H_
 #define PWGCF_TWOPARTICLECORRELATIONS_TABLEPRODUCER_IDENTIFIEDBFFILTER_H_
 
+#include <CCDB/BasicCCDBManager.h>
+
 #include <vector>
 #include <string>
 
@@ -24,6 +26,7 @@
 #include "Common/Core/TrackSelection.h"
 #include "Common/Core/TrackSelectionDefaults.h"
 #include "PWGCF/Core/AnalysisConfigurableCuts.h"
+#include "MathUtils/Utils.h"
 #include <TDatabasePDG.h>
 
 namespace o2
@@ -32,8 +35,8 @@ namespace aod
 {
 using CollisionsEvSelCent = soa::Join<aod::Collisions, aod::Mults, aod::EvSels, aod::CentFV0As, aod::CentFT0Ms, aod::CentFT0As, aod::CentFT0Cs, aod::CentNTPVs>;
 using CollisionEvSelCent = soa::Join<aod::Collisions, aod::Mults, aod::EvSels, aod::CentFV0As, aod::CentFT0Ms, aod::CentFT0As, aod::CentFT0Cs, aod::CentNTPVs>::iterator;
-using CollisionsEvSelRun2Cent = soa::Join<aod::Collisions, aod::Mults, aod::EvSels, aod::CentRun2V0Ms, aod::CentRun2CL0s, aod::CentRun2CL1s>;
-using CollisionEvSelRun2Cent = soa::Join<aod::Collisions, aod::Mults, aod::EvSels, aod::CentRun2V0Ms, aod::CentRun2CL0s, aod::CentRun2CL1s>::iterator;
+using CollisionsEvSelRun2Cent = soa::Join<aod::Collisions, aod::Mults, aod::EvSels, aod::CentRun2V0Ms>;
+using CollisionEvSelRun2Cent = soa::Join<aod::Collisions, aod::Mults, aod::EvSels, aod::CentRun2V0Ms>::iterator;
 using CollisionsEvSel = soa::Join<aod::Collisions, aod::Mults, aod::EvSels>;
 using CollisionEvSel = soa::Join<aod::Collisions, aod::Mults, aod::EvSels>::iterator;
 using TrackData = soa::Join<aod::Tracks, aod::TracksCov, aod::TracksExtra, aod::TracksDCA, aod::TrackSelection>::iterator;
@@ -43,18 +46,24 @@ namespace analysis
 namespace identifiedbffilter
 {
 
+const std::vector<int> pdgcodes = {11, 211, 321, 2212};
+
 /// \enum MatchRecoGenSpecies
 /// \brief The species considered by the matching test
 enum MatchRecoGenSpecies {
-  kIdBfCharged = 0, ///< charged particle/track
-  kIdBfElectron,    ///< electron
-  kIdBfMuon,        ///< muon
-  kIdBfPion,        ///< pion
-  kIdBfKaon,        ///< kaon
-  kIdBfProton,      ///< proton
-  kIdBfNoOfSpecies, ///< the number of considered species
+  kIdBfElectron = 0, ///< electron
+  kIdBfPion,         ///< pion
+  kIdBfKaon,         ///< kaon
+  kIdBfProton,       ///< proton
+  kIdBfNoOfSpecies,  ///< the number of considered species
+  kIdBfCharged = 4,
   kWrongSpecies = -1
 };
+
+constexpr int pdgcodeEl = 11;
+constexpr int pdgcodePi = 211;
+constexpr int pdgcodeKa = 321;
+constexpr int pdgcodePr = 2212;
 
 /// \enum SpeciesPairMatch
 /// \brief The species pair considered by the matching test
@@ -76,17 +85,15 @@ enum SpeciesPairMatch {
   kIdBfProtonProton      ///< Proton-Proton
 };
 
-const char* speciesName[kIdBfNoOfSpecies] = {"h", "e", "mu", "pi", "ka", "p"};
+const char* speciesName[kIdBfNoOfSpecies + 1] = {"e", "pi", "ka", "p", "ha"};
 
-const char* speciesTitle[kIdBfNoOfSpecies] = {"", "e", "#mu", "#pi", "K", "p"};
+const char* speciesTitle[kIdBfNoOfSpecies + 1] = {"e", "#pi", "K", "p", "ha"};
 
 const int speciesChargeValue1[kIdBfNoOfSpecies] = {
-  0, //<Unidentified hadron
-  2, //< electron
-  4, //< muon
-  6, //< pion
-  8, //< Kaon
-  10 //< proton
+  0, //< electron
+  2, //< pion
+  4, //< Kaon
+  6  //< proton
 };
 
 /// \enum SystemType
@@ -129,6 +136,8 @@ enum CentMultEstimatorType {
   knCentMultEstimators ///< number of centrality/mutiplicity estimator
 };
 
+float overallminp = 0.0f;
+
 /// \enum TriggerSelectionType
 /// \brief The type of trigger to apply for event selection
 enum TriggerSelectionType {
@@ -156,8 +165,6 @@ std::vector<TrackSelection*> trackFilters = {};
 bool dca2Dcut = false;
 float maxDCAz = 1e6f;
 float maxDCAxy = 1e6f;
-
-float minPIDSigma = 3.0;
 
 inline void initializeTrackSelection()
 {
@@ -520,7 +527,6 @@ inline float extractMultiplicity(CollisionObject const& collision, CentMultEstim
 //////////////////////////////////////////////////////////////////////////////////
 /// Centrality selection
 //////////////////////////////////////////////////////////////////////////////////
-
 /// \brief Centrality/multiplicity percentile
 template <typename CollisionObject>
 float getCentMultPercentile(CollisionObject collision)
@@ -533,10 +539,19 @@ float getCentMultPercentile(CollisionObject collision)
         return collision.centRun2V0M();
         break;
       case kCL0:
-        return collision.centRun2CL0();
+        if constexpr (framework::has_type_v<aod::cent::CentRun2CL0, typename CollisionObject::all_columns>) {
+          return collision.centRun2CL0();
+        } else {
+          return 105.0;
+        }
         break;
+
       case kCL1:
-        return collision.centRun2CL1();
+        if constexpr (framework::has_type_v<aod::cent::CentRun2CL1, typename CollisionObject::all_columns>) {
+          return collision.centRun2CL1();
+        } else {
+          return 105.0;
+        }
         break;
       default:
         return 105.0;
@@ -681,6 +696,7 @@ inline bool IsEvtSelected(CollisionObject const& collision, float& centormult)
   }
 
   bool centmultsel = centralitySelection(collision, centormult);
+
   return trigsel && zvtxsel && centmultsel;
 }
 
@@ -733,54 +749,10 @@ void exploreMothers(ParticleObject& particle, MCCollisionObject& collision)
   }
 }
 
-/// \brief Accepts or not the passed generated particle
-/// \param track the particle of interest
-/// \return the internal particle id, -1 if not accepted
-/// TODO: the PID implementation
-/// For the time being we keep the convention
-/// - positive particle pid even
-/// - negative particle pid odd
-/// - charged hadron 0/1
-template <typename ParticleObject, typename MCCollisionObject>
-inline int8_t AcceptParticle(ParticleObject& particle, MCCollisionObject const& collision)
+inline float getCharge(float pdgCharge)
 {
-  float charge = (fPDG->GetParticle(particle.pdgCode())->Charge() / 3 >= 1) ? 1.0 : ((fPDG->GetParticle(particle.pdgCode())->Charge() / 3 <= -1) ? -1.0 : 0.0);
-
-  if (particle.isPhysicalPrimary()) {
-    if ((particle.mcCollisionId() == 0) && traceCollId0) {
-      LOGF(info, "Particle %d passed isPhysicalPrimary", particle.globalIndex());
-    }
-    if (useOwnParticleSelection) {
-      float dcaxy = TMath::Sqrt((particle.vx() - collision.posX()) * (particle.vx() - collision.posX()) +
-                                (particle.vy() - collision.posY()) * (particle.vy() - collision.posY()));
-      float dcaz = TMath::Abs(particle.vz() - collision.posZ());
-      if (!((dcaxy < particleMaxDCAxy) && (dcaz < particleMaxDCAZ))) {
-        if ((particle.mcCollisionId() == 0) && traceCollId0) {
-          LOGF(info, "Rejecting particle with dcaxy: %.2f and dcaz: %.2f", dcaxy, dcaz);
-          LOGF(info, "   assigned collision Id: %d, looping on collision Id: %d", particle.mcCollisionId(), collision.globalIndex());
-          LOGF(info, "   Collision x: %.5f, y: %.5f, z: %.5f", collision.posX(), collision.posY(), collision.posZ());
-          LOGF(info, "   Particle x: %.5f, y: %.5f, z: %.5f", particle.vx(), particle.vy(), particle.vz());
-          LOGF(info, "   index: %d, pdg code: %d", particle.globalIndex(), particle.pdgCode());
-
-          exploreMothers(particle, collision);
-        }
-        return -1;
-      }
-    }
-    if (ptlow < particle.pt() && particle.pt() < ptup && etalow < particle.eta() && particle.eta() < etaup) {
-      if (charge > 0) {
-        return 0;
-      }
-      if (charge < 0) {
-        return 1;
-      }
-    }
-  } else {
-    if ((particle.mcCollisionId() == 0) && traceCollId0) {
-      LOGF(info, "Particle %d NOT passed isPhysicalPrimary", particle.globalIndex());
-    }
-  }
-  return -1;
+  float charge = (pdgCharge / 3 >= 1) ? 1.0 : ((pdgCharge / 3 <= -1) ? -1.0 : 0);
+  return charge;
 }
 
 } // namespace identifiedbffilter

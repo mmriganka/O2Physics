@@ -13,6 +13,7 @@
 /// \brief Utilities needed for the KFParticle package
 ///
 /// \author Annalena Kalteyer <annalena.sophie.kalteyer@cern.ch>, GSI Darmstadt
+/// \author Carolina Reetz <c.reetz@cern.ch>, Heidelberg University
 
 #ifndef TOOLS_KFPARTICLE_KFUTILITIES_H_
 #define TOOLS_KFPARTICLE_KFUTILITIES_H_
@@ -20,6 +21,8 @@
 #ifndef HomogeneousField
 #define HomogeneousField
 #endif
+
+#include <utility>
 
 #include <TDatabasePDG.h> // FIXME
 
@@ -103,6 +106,75 @@ KFPTrack createKFPTrackFromTrackParCov(const o2::track::TrackParametrizationWith
 {
   KFPTrack kfpTrack = createKFPTrack(trackparCov, trackSign, tpcNClsFound, tpcChi2NCl);
   return kfpTrack;
+}
+
+/// @brief Function to create a KFParticle from a o2::track::TrackParametrizationWithError track
+/// @tparam T
+/// @param trackparCov TrackParCov
+/// @param charge charg of track
+/// @param mass mass hypothesis
+/// @return KFParticle
+template <typename T>
+KFParticle createKFParticleFromTrackParCov(const o2::track::TrackParametrizationWithError<T>& trackparCov, int charge, float mass)
+{
+  std::array<T, 3> xyz, pxpypz;
+  float xyzpxpypz[6];
+  trackparCov.getPxPyPzGlo(pxpypz);
+  trackparCov.getXYZGlo(xyz);
+  for (int i{0}; i < 3; ++i) {
+    xyzpxpypz[i] = xyz[i];
+    xyzpxpypz[i + 3] = pxpypz[i];
+  }
+
+  std::array<float, 21> cv;
+  try {
+    trackparCov.getCovXYZPxPyPzGlo(cv);
+  } catch (std::runtime_error& e) {
+    LOG(debug) << "Failed to get cov matrix from TrackParCov" << e.what();
+  }
+
+  KFParticle kfPart;
+  float Mini, SigmaMini, M, SigmaM;
+  kfPart.GetMass(Mini, SigmaMini);
+  LOG(debug) << "Daughter KFParticle mass before creation: " << Mini << " +- " << SigmaMini;
+
+  try {
+    kfPart.Create(xyzpxpypz, cv.data(), charge, mass);
+  } catch (std::runtime_error& e) {
+    LOG(debug) << "Failed to create KFParticle from daughter TrackParCov" << e.what();
+  }
+
+  kfPart.GetMass(M, SigmaM);
+  LOG(debug) << "Daughter KFParticle mass after creation: " << M << " +- " << SigmaM;
+  return kfPart;
+}
+
+/// @brief Function to create a o2::track::TrackParametrizationWithError track from a KFParticle
+/// @param kfParticle KFParticle to transform
+/// @param pid PID hypothesis
+/// @param sign sign of the particle
+/// @return o2::track::TrackParametrizationWithError track
+o2::track::TrackParCov getTrackParCovFromKFP(const KFParticle& kfParticle, const o2::track::PID pid, const int sign)
+{
+  o2::gpu::gpustd::array<float, 3> xyz, pxpypz;
+  o2::gpu::gpustd::array<float, 21> cv;
+
+  // get parameters from kfParticle
+  xyz[0] = kfParticle.GetX();
+  xyz[1] = kfParticle.GetY();
+  xyz[2] = kfParticle.GetZ();
+  pxpypz[0] = kfParticle.GetPx();
+  pxpypz[1] = kfParticle.GetPy();
+  pxpypz[2] = kfParticle.GetPz();
+
+  // set covariance matrix elements (lower triangle)
+  for (int i = 0; i < 21; i++) {
+    cv[i] = kfParticle.GetCovariance(i);
+  }
+
+  // create TrackParCov track
+  o2::track::TrackParCov track = o2::track::TrackParCov(xyz, pxpypz, cv, sign, true, pid);
+  return track;
 }
 
 /// @brief Cosine of pointing angle from KFParticles
@@ -241,6 +313,93 @@ float ldlXYFromKF(KFParticle kfpParticle, KFParticle PV)
   if (dl_particle == 0.)
     return 9999.;
   return l_particle / dl_particle;
+}
+
+/// @brief squared distance between track and primary vertex normalised by its uncertainty evaluated in matrix form
+/// @param track KFParticle track (must be passed as a copy)
+/// @param vtx KFParticle primary vertex
+/// @return chi2 to primary vertex
+float kfCalculateChi2ToPrimaryVertex(KFParticle track, const KFParticle& vtx)
+{
+  const float PvPoint[3] = {vtx.X(), vtx.Y(), vtx.Z()};
+
+  track.TransportToPoint(PvPoint);
+  return track.GetDeviationFromVertex(vtx);
+}
+
+/// @brief prong's momentum in the secondary (decay) vertex
+/// @param track KFParticle track (must be passed as a copy)
+/// @param vtx KFParticle secondary vertex
+/// @return array with components of prong's momentum in the secondary (decay) vertex
+std::array<float, 3> kfCalculateProngMomentumInSecondaryVertex(KFParticle track, const KFParticle& vtx)
+{
+  const float SvPoint[3] = {vtx.X(), vtx.Y(), vtx.Z()};
+
+  track.TransportToPoint(SvPoint);
+  return {track.GetPx(), track.GetPy(), track.GetPz()};
+}
+
+/// @brief distance of closest approach between two tracks, cm
+/// @param track1 KFParticle first track (must be passed as a copy)
+/// @param track2 KFParticle second track (must be passed as a copy)
+/// @return DCA [cm] in the PCA
+float kfCalculateDistanceBetweenParticles(KFParticle track1, KFParticle track2)
+{
+  float dS[2];
+  float dsdr[4][6];
+  float params1[8], params2[8];
+  float covs1[36], covs2[36];
+  track1.GetDStoParticle(track2, dS, dsdr);
+  track1.Transport(dS[0], dsdr[0], params1, covs1);
+  track2.Transport(dS[1], dsdr[3], params2, covs2);
+  const float dx = params1[0] - params2[0];
+  const float dy = params1[1] - params2[1];
+  const float dz = params1[2] - params2[2];
+  return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/// @brief squared distance between two tracks normalised by its uncertainty evaluated in matrix form
+/// @param track1 KFParticle first track (must be passed as a copy)
+/// @param track2 KFParticle second track (must be passed as a copy)
+/// @return chi2 in PCA
+float kfCalculateChi2geoBetweenParticles(KFParticle track1, KFParticle track2)
+{
+  KFParticle kfPair;
+  const KFParticle* kfDaughters[3] = {&track1, &track2};
+  kfPair.SetConstructMethod(2);
+  kfPair.Construct(kfDaughters, 2);
+
+  return kfPair.Chi2() / kfPair.NDF();
+}
+
+/// @brief signed distance between primary and secondary vertex and its uncertainty, cm
+/// @param candidate KFParticle decay candidate (must be passed as a copy)
+/// @param vtx KFParticle primary vertex
+/// @return pair of l and delta l
+std::pair<float, float> kfCalculateLdL(KFParticle candidate, const KFParticle& vtx)
+{
+  float l, dl;
+  candidate.SetProductionVertex(vtx);
+  candidate.KFParticleBase::GetDecayLength(l, dl);
+
+  return std::make_pair(l, dl);
+}
+
+/// @brief Z projection of the impact parameter from the track to the primary vertex, cm
+/// @param candidate KFParticle prong
+/// @param vtx KFParticle primary vertex
+/// @return pair of impact parameter and its error
+std::pair<float, float> kfCalculateImpactParameterZ(const KFParticle& candidate, const KFParticle& vtx)
+{
+  float distanceToVertexXY, errDistanceToVertexXY;
+  candidate.GetDistanceFromVertexXY(vtx, distanceToVertexXY, errDistanceToVertexXY);
+  const float distanceToVertex = candidate.GetDistanceFromVertex(vtx);
+  const float chi2ToVertex = candidate.GetDeviationFromVertex(vtx);
+  const float distanceToVertexZ2 = distanceToVertex * distanceToVertex - distanceToVertexXY * distanceToVertexXY;
+  const float distanceToVertexZ = distanceToVertexZ2 > 0 ? std::sqrt(distanceToVertexZ2) : -std::sqrt(-distanceToVertexZ2);
+  const float errDistanceToVertexZ2 = (distanceToVertex * distanceToVertex * distanceToVertex * distanceToVertex / chi2ToVertex - distanceToVertexXY * distanceToVertexXY * errDistanceToVertexXY * errDistanceToVertexXY) / distanceToVertexZ2;
+  const float errDistanceToVertexZ = errDistanceToVertexZ2 > 0 ? std::sqrt(errDistanceToVertexZ2) : -std::sqrt(-errDistanceToVertexZ2);
+  return std::make_pair(distanceToVertexZ, errDistanceToVertexZ);
 }
 
 #endif // TOOLS_KFPARTICLE_KFUTILITIES_H_

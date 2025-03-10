@@ -24,6 +24,16 @@ o2physics_add_dpl_workflow(k892analysis
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(k892analysispbpb
+    SOURCES k892analysispbpb.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(kstar892analysis
+    SOURCES kstar892analysis.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(k892pmanalysis
     SOURCES k892pmanalysis.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
@@ -46,6 +56,11 @@ o2physics_add_dpl_workflow(phianalysisrun3
 
 o2physics_add_dpl_workflow(f0980analysis
     SOURCES f0980analysis.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(f0980pbpbanalysis
+    SOURCES f0980pbpbanalysis.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
@@ -85,7 +100,7 @@ o2physics_add_dpl_workflow(lambda1520-pbpb
     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(kshortkshort
-    SOURCES KshortKshort.cxx
+    SOURCES higherMassResonances.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
@@ -119,8 +134,18 @@ o2physics_add_dpl_workflow(kstarpbpb
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(lstarpbpbv2
+    SOURCES lstarpbpbv2.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(xi1530analysis
     SOURCES xi1530Analysis.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(xi1530analysisqa
+    SOURCES xi1530Analysisqa.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
@@ -129,8 +154,52 @@ o2physics_add_dpl_workflow(kaonkaonanalysis
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
- o2physics_add_dpl_workflow(highmasslambda
+o2physics_add_dpl_workflow(highmasslambda
     SOURCES highmasslambda.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(lambdav2
+    SOURCES lambdav2.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(highmasslambdasvx
+    SOURCES highmasslambdasvx.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(chk892flow
+    SOURCES chk892Flow.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(chk892pp
+    SOURCES chk892pp.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(doublephimeson
+    SOURCES doublephimeson.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(kshortlambda
+    SOURCES kshortlambda.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(rho770analysis
+    SOURCES rho770analysis.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(kstarpbpbv1
+    SOURCES kstarFlowv1.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(heptaquark
+    SOURCES heptaquark.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)

@@ -15,9 +15,13 @@
 ///
 /// \author Panos Christakoglou <panos.christakoglou@cern.ch>, Nikhef
 
+#include <memory>
+#include <utility>
+
 #include "CommonConstants/PhysicsConstants.h"
 #include "DCAFitter/DCAFitterN.h"
 #include "Framework/AnalysisTask.h"
+#include "Framework/runDataProcessing.h"
 #include "ReconstructionDataFormats/DCA.h"
 #include "ReconstructionDataFormats/V0.h"
 
@@ -36,31 +40,23 @@ using namespace o2::framework;
 using namespace o2::framework::expressions;
 using namespace o2::hf_trkcandsel;
 
-void customize(std::vector<o2::framework::ConfigParamSpec>& workflowOptions)
-{
-  ConfigParamSpec optionDoMC{"doMC", VariantType::Bool, true, {"Perform MC matching."}};
-  workflowOptions.push_back(optionDoMC);
-}
-
-#include "Framework/runDataProcessing.h"
-
 /// Reconstruction of Λb candidates
 struct HfCandidateCreatorLb {
   Produces<aod::HfCandLbBase> rowCandidateBase;
 
   // vertexing
-  Configurable<double> bz{"bz", 20., "magnetic field"};
+  Configurable<float> bz{"bz", 20., "magnetic field"};
   Configurable<bool> propagateToPCA{"propagateToPCA", true, "create tracks version propagated to PCA"};
   Configurable<bool> useAbsDCA{"useAbsDCA", false, "Minimise abs. distance rather than chi2"};
   Configurable<bool> useWeightedFinalPCA{"useWeightedFinalPCA", false, "Recalculate vertex position using track covariances, effective only if useAbsDCA is true"};
-  Configurable<double> maxR{"maxR", 200., "reject PCA's above this radius"};
-  Configurable<double> maxDZIni{"maxDZIni", 4., "reject (if>0) PCA candidate if tracks DZ exceeds threshold"};
-  Configurable<double> minParamChange{"minParamChange", 1.e-3, "stop iterations if largest change of any Lb is smaller than this"};
-  Configurable<double> minRelChi2Change{"minRelChi2Change", 0.9, "stop iterations is chi2/chi2old > this"};
+  Configurable<float> maxR{"maxR", 200., "reject PCA's above this radius"};
+  Configurable<float> maxDZIni{"maxDZIni", 4., "reject (if>0) PCA candidate if tracks DZ exceeds threshold"};
+  Configurable<float> minParamChange{"minParamChange", 1.e-3, "stop iterations if largest change of any Lb is smaller than this"};
+  Configurable<float> minRelChi2Change{"minRelChi2Change", 0.9, "stop iterations is chi2/chi2old > this"};
   // selection
-  Configurable<double> ptPionMin{"ptPionMin", 0.5, "minimum pion pT threshold (GeV/c)"};
+  Configurable<float> ptPionMin{"ptPionMin", 0.5, "minimum pion pT threshold (GeV/c)"};
   Configurable<int> selectionFlagLc{"selectionFlagLc", 1, "Selection Flag for Lc"};
-  Configurable<double> yCandMax{"yCandMax", -1., "max. cand. rapidity"};
+  Configurable<float> yCandMax{"yCandMax", -1., "max. cand. rapidity"};
 
   o2::vertexing::DCAFitterN<2> df2; // 2-prong vertex fitter
   o2::vertexing::DCAFitterN<3> df3; // 3-prong vertex fitter (to rebuild Lc vertex)
@@ -72,6 +68,9 @@ struct HfCandidateCreatorLb {
 
   Filter filterSelectCandidates = (aod::hf_sel_candidate_lc::isSelLcToPKPi >= selectionFlagLc || aod::hf_sel_candidate_lc::isSelLcToPiKP >= selectionFlagLc);
 
+  std::shared_ptr<TH1> hCandidatesLc, hCandidatesLb;
+  HistogramRegistry registry{"registry"};
+
   OutputObj<TH1F> hMassLcToPKPi{TH1F("hMassLcToPKPi", "#Lambda_{c}^{#plus} candidates;inv. mass (pK^{#minus} #pi^{#plus}) (GeV/#it{c}^{2});entries", 500, 0., 5.)};
   OutputObj<TH1F> hPtLc{TH1F("hPtLc", "#Lambda_{c}^{#plus} candidates;#Lambda_{c}^{#plus} candidate #it{p}_{T} (GeV/#it{c});entries", 100, 0., 10.)};
   OutputObj<TH1F> hPtPion{TH1F("hPtPion", "#pi^{#minus} candidates;#pi^{#minus} candidate #it{p}_{T} (GeV/#it{c});entries", 100, 0., 10.)};
@@ -79,9 +78,6 @@ struct HfCandidateCreatorLb {
   OutputObj<TH1F> hMassLbToLcPi{TH1F("hMassLbToLcPi", "2-prong candidates;inv. mass (#Lambda_{b}^{0} #rightarrow #Lambda_{c}^{#plus}#pi^{#minus} #rightarrow pK^{#minus}#pi^{#plus}#pi^{#minus}) (GeV/#it{c}^{2});entries", 500, 3., 8.)};
   OutputObj<TH1F> hCovPVXX{TH1F("hCovPVXX", "2-prong candidates;XX element of cov. matrix of prim. vtx. position (cm^{2});entries", 100, 0., 1.e-4)};
   OutputObj<TH1F> hCovSVXX{TH1F("hCovSVXX", "2-prong candidates;XX element of cov. matrix of sec. vtx. position (cm^{2});entries", 100, 0., 0.2)};
-
-  std::shared_ptr<TH1> hCandidatesLc, hCandidatesLb;
-  HistogramRegistry registry{"registry"};
 
   void init(InitContext const&)
   {
@@ -139,7 +135,7 @@ struct HfCandidateCreatorLb {
       auto trackParVar0 = getTrackParCov(track0);
       auto trackParVar1 = getTrackParCov(track1);
       auto trackParVar2 = getTrackParCov(track2);
-      auto collision = track0.collision();
+      auto collision = lcCand.collision();
 
       // reconstruct the 3-prong secondary vertex
       hCandidatesLc->Fill(SVFitting::BeforeFit);
@@ -148,7 +144,7 @@ struct HfCandidateCreatorLb {
           continue;
         }
       } catch (const std::runtime_error& error) {
-        LOG(info) << "Run time error found: " << error.what() << ". DCFitterN cannot work, skipping the candidate.";
+        LOG(info) << "Run time error found: " << error.what() << ". DCAFitterN cannot work, skipping the candidate.";
         hCandidatesLc->Fill(SVFitting::Fail);
         continue;
       }
@@ -190,7 +186,7 @@ struct HfCandidateCreatorLb {
             continue;
           }
         } catch (const std::runtime_error& error) {
-          LOG(info) << "Run time error found: " << error.what() << ". DCFitterN cannot work, skipping the candidate.";
+          LOG(info) << "Run time error found: " << error.what() << ". DCAFitterN cannot work, skipping the candidate.";
           hCandidatesLb->Fill(SVFitting::Fail);
           continue;
         }
@@ -246,26 +242,24 @@ struct HfCandidateCreatorLb {
           hMassLbToLcPi->Fill(massLcPi);
         }
       } // pi- loop
-    }   // Lc loop
-  }     // process
-};      // struct
+    } // Lc loop
+  } // process
+}; // struct
 
 /// Extends the base table with expression columns.
 struct HfCandidateCreatorLbExpressions {
   Spawns<aod::HfCandLbExt> rowCandidateLb;
-
-  void init(InitContext const&) {}
-};
-
-/// Performs MC matching.
-struct HfCandidateCreatorLbMc {
   Produces<aod::HfCandLbMcRec> rowMcMatchRec;
   Produces<aod::HfCandLbMcGen> rowMcMatchGen;
 
-  void process(aod::HfCandLb const& candidates,
-               aod::HfCand3Prong const&,
-               aod::TracksWMc const&,
-               aod::McParticles const& mcParticles)
+  void init(InitContext const&) {}
+
+  /// @brief dummy process function, to be run on data
+  void process(aod::Tracks const&) {}
+
+  void processMc(aod::HfCand3Prong const& lcCandidates,
+                 aod::TracksWMc const& tracks,
+                 aod::McParticles const& mcParticles)
   {
     int indexRec = -1;
     int8_t sign = 0;
@@ -273,8 +267,11 @@ struct HfCandidateCreatorLbMc {
     int8_t origin = 0;
     int8_t debug = 0;
 
+    rowCandidateLb->bindExternalIndices(&tracks);
+    rowCandidateLb->bindExternalIndices(&lcCandidates);
+
     // Match reconstructed candidates.
-    for (const auto& candidate : candidates) {
+    for (const auto& candidate : *rowCandidateLb) {
       flag = 0;
       origin = 0;
       debug = 0;
@@ -308,14 +305,15 @@ struct HfCandidateCreatorLbMc {
       // Λb → Λc+ π-
       if (RecoDecay::isMatchedMCGen(mcParticles, particle, Pdg::kLambdaB0, std::array{static_cast<int>(Pdg::kLambdaCPlus), -kPiPlus}, true)) {
         // Λc+ → p K- π+
-        auto LcCandMC = mcParticles.rawIteratorAt(particle.daughtersIds().front());
-        if (RecoDecay::isMatchedMCGen(mcParticles, LcCandMC, static_cast<int>(Pdg::kLambdaCPlus), std::array{+kProton, -kKPlus, +kPiPlus}, true, &sign)) {
+        auto candLcMc = mcParticles.rawIteratorAt(particle.daughtersIds().front());
+        if (RecoDecay::isMatchedMCGen(mcParticles, candLcMc, static_cast<int>(Pdg::kLambdaCPlus), std::array{+kProton, -kKPlus, +kPiPlus}, true, &sign)) {
           flag = sign * (1 << hf_cand_lb::DecayType::LbToLcPi);
         }
       }
       rowMcMatchGen(flag, origin);
     }
   }
+  PROCESS_SWITCH(HfCandidateCreatorLbExpressions, processMc, "Process MC", false);
 };
 
 WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
@@ -323,9 +321,5 @@ WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
   WorkflowSpec workflow{
     adaptAnalysisTask<HfCandidateCreatorLb>(cfgc),
     adaptAnalysisTask<HfCandidateCreatorLbExpressions>(cfgc)};
-  const bool doMC = cfgc.options().get<bool>("doMC");
-  if (doMC) {
-    workflow.push_back(adaptAnalysisTask<HfCandidateCreatorLbMc>(cfgc));
-  }
   return workflow;
 }

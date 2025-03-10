@@ -35,7 +35,7 @@
 #include "TPDGCode.h"
 
 using namespace o2;
-using namespace o2::analysis::femtoUniverse;
+using namespace o2::analysis::femto_universe;
 using namespace o2::track;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
@@ -73,7 +73,7 @@ struct femtoUniverseEficiencyTask {
   Configurable<float> cfgDcaXY{"cfgDcaXY", 2.4, "Value of max. DCA_XY"};
   Configurable<float> cfgDcaZ{"cfgDcaZ", 3.2, "Value of max. DCA_Z"};
   /// Event cuts
-  o2::analysis::femtoUniverse::FemtoUniverseCollisionSelection colCuts;
+  o2::analysis::femto_universe::FemtoUniverseCollisionSelection colCuts;
   Configurable<float> ConfEvtZvtx{"ConfEvtZvtx", 10.f, "Evt sel: Max. z-Vertex (cm)"};
   Configurable<bool> ConfEvtTriggerCheck{"ConfEvtTriggerCheck", true, "Evt sel: check for trigger"};
   Configurable<int> ConfEvtTriggerSel{"ConfEvtTriggerSel", kINT7, "Evt sel: trigger"};
@@ -185,6 +185,7 @@ struct femtoUniverseEficiencyTask {
     registryMCtruth.add("plus/MCtruthPi", "MC truth pions;#it{p}_{T} (GeV/c); #eta", {HistType::kTH2F, {{500, 0, 5}, {400, -1.0, 1.0}}});
     registryMCtruth.add("plus/MCtruthKa", "MC truth kaons;#it{p}_{T} (GeV/c); #eta", {HistType::kTH2F, {{500, 0, 5}, {400, -1.0, 1.0}}});
     registryMCtruth.add("plus/MCtruthPr", "MC truth protons;#it{p}_{T} (GeV/c); #eta", {HistType::kTH2F, {{500, 0, 5}, {400, -1.0, 1.0}}});
+    registryMCtruth.add("plus/MCtruthPhi", "MC truth Phi mesons;#it{p}_{T} (GeV/c); #eta", {HistType::kTH2F, {{500, 0, 5}, {400, -1.0, 1.0}}});
 
     registryMCtruth.add("minus/MCtruthPi", "MC truth pions;#it{p}_{T} (GeV/c); #eta", {HistType::kTH2F, {{500, 0, 5}, {400, -1.0, 1.0}}});
     registryMCtruth.add("minus/MCtruthKa", "MC truth kaons;#it{p}_{T} (GeV/c); #eta", {HistType::kTH2F, {{500, 0, 5}, {400, -1.0, 1.0}}});
@@ -193,6 +194,7 @@ struct femtoUniverseEficiencyTask {
     registryMCtruth.add("plus/MCtruthPiPt", "MC truth pions;#it{p}_{T} (GeV/c)", {HistType::kTH1F, {{500, 0, 5}}});
     registryMCtruth.add("plus/MCtruthKaPt", "MC truth kaons;#it{p}_{T} (GeV/c)", {HistType::kTH1F, {{500, 0, 5}}});
     registryMCtruth.add("plus/MCtruthPrPt", "MC truth protons;#it{p}_{T} (GeV/c)", {HistType::kTH1F, {{500, 0, 5}}});
+    registryMCtruth.add("plus/MCtruthPhiPt", "MC truth Phi mesons;#it{p}_{T} (GeV/c)", {HistType::kTH1F, {{500, 0, 5}}});
     registryMCtruth.add("plus/MCtruthAllPt", "MC truth all;#it{p}_{T} (GeV/c)", {HistType::kTH1F, {{500, 0, 5}}});
 
     registryMCtruth.add("minus/MCtruthPiPt", "MC truth pions;#it{p}_{T} (GeV/c)", {HistType::kTH1F, {{500, 0, 5}}});
@@ -378,7 +380,7 @@ struct femtoUniverseEficiencyTask {
 
   using BigTracksMC = soa::Join<TracksPID, aod::McTrackLabels, aod::TrackSelection>;
   Preslice<BigTracksMC> perCollisionID = aod::track::collisionId;
-  void processMCTruth(aod::McCollision const& collision, soa::SmallGroups<soa::Join<aod::McCollisionLabels, aod::Collisions>> const& collisions, aod::McParticles const& mcparticles, soa::Filtered<BigTracksMC> const& tracks)
+  void processMCTruth(aod::McCollision const& /*collision*/, soa::SmallGroups<soa::Join<aod::McCollisionLabels, aod::Collisions>> const& collisions, aod::McParticles const& mcparticles, soa::Filtered<BigTracksMC> const& tracks)
   {
     // Loop over reconstructed collisions corresponding to MC collision
     for (auto& collision : collisions) {
@@ -526,6 +528,10 @@ struct femtoUniverseEficiencyTask {
       if (mcparticle.pdgCode() == 2212) {
         registryMCtruth.fill(HIST("plus/MCtruthPr"), mcparticle.pt(), mcparticle.eta());
         registryMCtruth.fill(HIST("plus/MCtruthPrPt"), mcparticle.pt());
+      }
+      if (mcparticle.pdgCode() == 333) {
+        registryMCtruth.fill(HIST("plus/MCtruthPhi"), mcparticle.pt(), mcparticle.eta());
+        registryMCtruth.fill(HIST("plus/MCtruthPhiPt"), mcparticle.pt());
       }
 
       if (pdgParticle->Charge() < 0) {

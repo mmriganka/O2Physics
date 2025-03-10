@@ -12,8 +12,17 @@
 // \brief Saves relevant information of DG candidates
 // \author Paul Buehler, paul.buehler@oeaw.ac.at
 
+#include <vector>
+#include <string>
+#include <map>
 #include "Framework/runDataProcessing.h"
 #include "Framework/AnalysisTask.h"
+#include "Framework/HistogramRegistry.h"
+#include "ReconstructionDataFormats/Vertex.h"
+#include "EventFiltering/Zorro.h"
+#include "EventFiltering/ZorroSummary.h"
+#include "CCDB/BasicCCDBManager.h"
+#include "Common/CCDB/ctpRateFetcher.h"
 #include "PWGUD/DataModel/UDTables.h"
 #include "PWGUD/Core/UPCHelpers.h"
 #include "PWGUD/Core/DGSelector.h"
@@ -22,20 +31,13 @@ using namespace o2;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
 
+#define getHist(type, name) std::get<std::shared_ptr<type>>(histPointers[name])
+
 struct DGCandProducer {
-  // get a DGCutparHolder
-  DGCutparHolder diffCuts = DGCutparHolder();
-  Configurable<DGCutparHolder> DGCuts{"DGCuts", {}, "DG event cuts"};
-  Configurable<bool> saveAllTracks{"saveAllTracks", true, "save only PV contributors or all tracks associated to a collision"};
-  Configurable<bool> rejectAtTFBoundary{"rejectAtTFBoundary", false, "reject collisions at a TF boundary"};
-  Configurable<bool> fillFIThistos{"fillFIThistos", false, "fill the histograms with the FIT amplitudes"};
-
-  // DG selector
-  DGSelector dgSelector;
-
   // data tables
   Produces<aod::UDCollisions> outputCollisions;
   Produces<aod::UDCollisionsSels> outputCollisionsSels;
+  Produces<aod::UDCollisionSelExtras> outputCollisionSelExtras;
   Produces<aod::UDCollsLabels> outputCollsLabels;
   Produces<aod::UDZdcs> outputZdcs;
   Produces<aod::UDZdcsReduced> outputZdcsReduced;
@@ -49,10 +51,33 @@ struct DGCandProducer {
   Produces<aod::UDFwdTracksExtra> outputFwdTracksExtra;
   Produces<aod::UDTracksLabels> outputTracksLabel;
 
+  // get a DGCutparHolder
+  DGCutparHolder diffCuts = DGCutparHolder();
+  Configurable<DGCutparHolder> DGCuts{"DGCuts", {}, "DG event cuts"};
+
+  // DG selector
+  DGSelector dgSelector;
+
+  // configurables
+  Configurable<bool> saveAllTracks{"saveAllTracks", true, "save only PV contributors or all tracks associated to a collision"};
+  Configurable<std::vector<int>> generatorIds{"generatorIds", std::vector<int>{-1}, "MC generatorIds to process"};
+
+  // zorro object
+  int mRunNumber;
+  Service<o2::ccdb::BasicCCDBManager> ccdb;
+  Zorro zorro;
+  OutputObj<ZorroSummary> zorroSummary{"zorroSummary"};
+  Configurable<std::string> cfgCCDBurl{"ccdb-url", "http://alice-ccdb.cern.ch", "url of the ccdb repository"};
+  Configurable<std::string> cfgZorroCCDBpath{"cfgZorroCCDBpath", "/Users/m/mpuccio/EventFiltering/OTS/", "path to the zorro ccdb objects"};
+  Configurable<bool> cfgSkimmedProcessing{"cfgSkimmedProcessing", false, "Skimmed dataset processing"};
+  Configurable<std::string> triggerName{"triggerName", "fUDiff,fUDdiffSmall,fUDiffLarge", "Name of the software trigger"};
+
+  // ctpRateFetcher
+  ctpRateFetcher mRateFetcher;
+
   // initialize histogram registry
-  HistogramRegistry registry{
-    "registry",
-    {}};
+  HistogramRegistry registry{"registry", {}, OutputObjHandlingPolicy::AnalysisObject, false, true};
+  std::map<std::string, HistPtr> histPointers;
 
   // data inputs
   using CCs = soa::Join<aod::Collisions, aod::EvSels>;
@@ -65,6 +90,9 @@ struct DGCandProducer {
                         aod::pidTOFFullEl, aod::pidTOFFullMu, aod::pidTOFFullPi, aod::pidTOFFullKa, aod::pidTOFFullPr>;
   using FWs = aod::FwdTracks;
 
+  using MCCCs = soa::Join<aod::Collisions, aod::EvSels, aod::McCollisionLabels>;
+  using MCCC = MCCCs::iterator;
+
   // function to update UDFwdTracks, UDFwdTracksExtra
   template <typename TFwdTrack>
   void updateUDFwdTrackTables(TFwdTrack const& fwdtrack, uint64_t const& bcnum)
@@ -72,11 +100,13 @@ struct DGCandProducer {
     outputFwdTracks(outputCollisions.lastIndex(),
                     fwdtrack.px(), fwdtrack.py(), fwdtrack.pz(), fwdtrack.sign(),
                     bcnum, fwdtrack.trackTime(), fwdtrack.trackTimeRes());
-    outputFwdTracksExtra(fwdtrack.nClusters(),
+    outputFwdTracksExtra(fwdtrack.trackType(),
+                         fwdtrack.nClusters(),
                          fwdtrack.pDca(),
                          fwdtrack.rAtAbsorberEnd(),
                          fwdtrack.chi2(),
                          fwdtrack.chi2MatchMCHMID(),
+                         fwdtrack.chi2MatchMCHMFT(),
                          fwdtrack.mchBitMap(),
                          fwdtrack.midBitMap(),
                          fwdtrack.midBoards());
@@ -132,76 +162,30 @@ struct DGCandProducer {
     outputTracksLabel(track.globalIndex());
   }
 
-  template <typename TBC>
-  void fillFIThistograms(TBC const& bc)
+  void createHistograms(std::string histdir)
   {
-    std::array<bool, 5> triggers{{true, !udhelpers::cleanFIT(bc, diffCuts.maxFITtime(), diffCuts.FITAmpLimits()),
-                                  udhelpers::TVX(bc), udhelpers::TSC(bc), udhelpers::TCE(bc)}};
-    if (bc.has_foundFV0()) {
-      auto fv0 = bc.foundFV0();
-      auto ampA = udhelpers::FV0AmplitudeA(fv0);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, 0);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, triggers[1] ? 1 : 5);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, triggers[2] ? 2 : 6);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, triggers[3] ? 3 : 7);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, triggers[4] ? 4 : 8);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, bc.selection_bit(o2::aod::evsel::kIsBBV0A) ? 9 : 10);
-      registry.get<TH2>(HIST("reco/fv0"))->Fill(ampA, bc.selection_bit(o2::aod::evsel::kNoBGV0A) ? 11 : 12);
+    const int nXbinsInStatH = 26;
+    std::string labels[nXbinsInStatH] = {
+      "all", "hasBC", "zorro", "accepted", "FITveto", "MID trk", "global not PV trk", "not global PV trk",
+      "ITS-only PV trk", "TOF PV trk fraction", "n PV trks", "PID", "pt", "eta", "net charge",
+      "inv mass", "evsel TF border", "evsel no pile-up", "evsel ITSROF", "evsel z-vtx", "evsel ITSTPC vtx",
+      "evsel TRD vtx", "evsel TOF vtx", "", "", ""};
+
+    std::string hname = histdir + "/Stat";
+    histPointers.insert({hname, registry.add(hname.c_str(), "Cut statistics, Collisions", {HistType::kTH1F, {{nXbinsInStatH, -0.5, static_cast<float>(nXbinsInStatH - 0.5)}}})});
+    getHist(TH1, hname)->SetNdivisions(nXbinsInStatH, "X");
+    for (int iXbin(1); iXbin < nXbinsInStatH + 1; iXbin++) {
+      getHist(TH1, hname)->GetXaxis()->ChangeLabel(iXbin, 45, 0.03, 33, -1, -1, labels[iXbin - 1]);
     }
-    if (bc.has_foundFT0()) {
-      auto ft0 = bc.foundFT0();
-      auto ampA = udhelpers::FT0AmplitudeA(ft0);
-      auto ampC = udhelpers::FT0AmplitudeC(ft0);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, 0);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, 0);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, triggers[1] ? 1 : 5);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, triggers[1] ? 1 : 5);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, triggers[2] ? 2 : 6);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, triggers[2] ? 2 : 6);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, triggers[3] ? 3 : 7);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, triggers[3] ? 3 : 7);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, triggers[4] ? 4 : 8);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, triggers[4] ? 4 : 8);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, bc.selection_bit(o2::aod::evsel::kIsBBT0A) ? 9 : 10);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, bc.selection_bit(o2::aod::evsel::kIsBBT0C) ? 9 : 10);
-      registry.get<TH2>(HIST("reco/ft0A"))->Fill(ampA, bc.selection_bit(o2::aod::evsel::kNoBGT0A) ? 11 : 12);
-      registry.get<TH2>(HIST("reco/ft0C"))->Fill(ampC, bc.selection_bit(o2::aod::evsel::kNoBGT0C) ? 11 : 12);
-    }
-    if (bc.has_foundFDD()) {
-      auto fdd = bc.foundFDD();
-      auto ampA = udhelpers::FDDAmplitudeA(fdd);
-      auto ampC = udhelpers::FDDAmplitudeC(fdd);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, 0);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, 0);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, triggers[1] ? 1 : 5);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, triggers[1] ? 1 : 5);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, triggers[2] ? 2 : 6);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, triggers[2] ? 2 : 6);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, triggers[3] ? 3 : 7);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, triggers[3] ? 3 : 7);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, triggers[4] ? 4 : 8);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, triggers[4] ? 4 : 8);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, bc.selection_bit(o2::aod::evsel::kIsBBFDA) ? 9 : 10);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, bc.selection_bit(o2::aod::evsel::kIsBBFDC) ? 9 : 10);
-      registry.get<TH2>(HIST("reco/fddA"))->Fill(ampA, bc.selection_bit(o2::aod::evsel::kNoBGFDA) ? 11 : 12);
-      registry.get<TH2>(HIST("reco/fddC"))->Fill(ampC, bc.selection_bit(o2::aod::evsel::kNoBGFDC) ? 11 : 12);
-    }
-  }
 
-  void init(InitContext&)
-  {
-    LOGF(debug, "<DGCandProducer> beginning of init reached");
-
-    diffCuts = (DGCutparHolder)DGCuts;
-
-    const int nXbinsInStatH = 25;
-
-    // add histograms for the different process functions
-    registry.add("reco/Stat", "Cut statistics;; Collisions", {HistType::kTH1F, {{nXbinsInStatH, -0.5, static_cast<float>(nXbinsInStatH - 0.5)}}});
-    registry.add("reco/pt1Vspt2", "2 prong events, p_{T} versus p_{T}", {HistType::kTH2F, {{100, -3., 3.}, {100, -3., 3.0}}});
-    registry.add("reco/TPCsignal1", "2 prong events, TPC signal versus p_{T} of particle 1", {HistType::kTH2F, {{200, -3., 3.}, {200, 0., 100.0}}});
-    registry.add("reco/TPCsignal2", "2 prong events, TPC signal versus p_{T} of particle 2", {HistType::kTH2F, {{200, -3., 3.}, {200, 0., 100.0}}});
-    registry.add("reco/sig1VsSig2TPC", "2 prong events, TPC signal versus TPC signal", {HistType::kTH2F, {{100, 0., 100.}, {100, 0., 100.}}});
+    hname = histdir + "/pt1Vspt2";
+    histPointers.insert({hname, registry.add(hname.c_str(), "2 prong events, p_{T} versus p_{T}", {HistType::kTH2F, {{100, -3., 3.}, {100, -3., 3.0}}})});
+    hname = histdir + "/TPCsignal1";
+    histPointers.insert({hname, registry.add(hname.c_str(), "2 prong events, TPC signal versus p_{T} of particle 1", {HistType::kTH2F, {{200, -3., 3.}, {200, 0., 100.0}}})});
+    hname = histdir + "/TPCsignal2";
+    histPointers.insert({hname, registry.add(hname.c_str(), "2 prong events, TPC signal versus p_{T} of particle 2", {HistType::kTH2F, {{200, -3., 3.}, {200, 0., 100.0}}})});
+    hname = histdir + "/sig1VsSig2TPC";
+    histPointers.insert({hname, registry.add(hname.c_str(), "2 prong events, TPC signal versus TPC signal", {HistType::kTH2F, {{100, 0., 100.}, {100, 0., 100.}}})});
 
     // FIT amplitudes
     //   0: unconditional
@@ -211,47 +195,124 @@ struct DGCandProducer {
     //   4: TCE              8: no TCE
     //   9: IsBBXXX         10: !IsBBXXX
     //  11: kNoBGXXX        12: !kNoBGXXX
-    registry.add("reco/fv0", "FV0 amplitudes", {HistType::kTH2F, {{20001, -0.5, 20000.5}, {13, -0.5, 12.5}}});
-    registry.add("reco/ft0A", "FT0A amplitudes", {HistType::kTH2F, {{20001, -0.5, 20000.5}, {13, -0.5, 12.5}}});
-    registry.add("reco/ft0C", "FT0C amplitudes", {HistType::kTH2F, {{20001, -0.5, 20000.5}, {13, -0.5, 12.5}}});
-    registry.add("reco/fddA", "FDDA amplitudes", {HistType::kTH2F, {{20001, -0.5, 20000.5}, {13, -0.5, 12.5}}});
-    registry.add("reco/fddC", "FDDC amplitudes", {HistType::kTH2F, {{20001, -0.5, 20000.5}, {13, -0.5, 12.5}}});
-
-    std::string labels[nXbinsInStatH] = {"all", "hasBC", "selected", "FITveto", "MID trk", "global PV trk", "not global PB trk",
-                                         "ITS-only PV trk", "TOF PV trk fraction", "n PV trks", "PID", "pt", "eta", "net charge",
-                                         "inv mass", "TF border", "no pile-up", "ITSROF", "z-vtx", "ITSTPC vtx", "", "", "", "", ""};
-
-    registry.get<TH1>(HIST("reco/Stat"))->SetNdivisions(nXbinsInStatH, "X");
-    for (int iXbin(1); iXbin < nXbinsInStatH + 1; iXbin++) {
-      registry.get<TH1>(HIST("reco/Stat"))->GetXaxis()->ChangeLabel(iXbin, 45, 0.03, 33, -1, -1, labels[iXbin - 1]);
-    }
-
-    LOGF(debug, "<DGCandProducer> end of init reached");
+    const int nXbinsFITH = 201;
+    hname = histdir + "/fv0";
+    histPointers.insert({hname, registry.add(hname.c_str(), "FV0 amplitudes", {HistType::kTH2F, {{nXbinsFITH, -0.5, nXbinsFITH - 0.5}, {13, -0.5, 12.5}}})});
+    hname = histdir + "/ft0A";
+    histPointers.insert({hname, registry.add(hname.c_str(), "FT0A amplitudes", {HistType::kTH2F, {{nXbinsFITH, -0.5, nXbinsFITH - 0.5}, {13, -0.5, 12.5}}})});
+    hname = histdir + "/ft0C";
+    histPointers.insert({hname, registry.add(hname.c_str(), "FT0C amplitudes", {HistType::kTH2F, {{nXbinsFITH, -0.5, nXbinsFITH - 0.5}, {13, -0.5, 12.5}}})});
+    hname = histdir + "/fddA";
+    histPointers.insert({hname, registry.add(hname.c_str(), "FDDA amplitudes", {HistType::kTH2F, {{nXbinsFITH, -0.5, nXbinsFITH - 0.5}, {13, -0.5, 12.5}}})});
+    hname = histdir + "/fddC";
+    histPointers.insert({hname, registry.add(hname.c_str(), "FDDC amplitudes", {HistType::kTH2F, {{nXbinsFITH, -0.5, nXbinsFITH - 0.5}, {13, -0.5, 12.5}}})});
   }
 
-  // process function for real data
-  void process(CC const& collision, BCs const& bcs, TCs& tracks, FWs& fwdtracks,
-               aod::Zdcs& /*zdcs*/, aod::FV0As& fv0as, aod::FT0s& ft0s, aod::FDDs& fdds)
+  template <typename TBC>
+  void fillFIThistograms(TBC const& bc, std::string histdir)
+  {
+    LOGF(debug, "");
+    std::array<bool, 5> triggers{{true, !udhelpers::cleanFIT(bc, diffCuts.maxFITtime(), diffCuts.FITAmpLimits()),
+                                  udhelpers::TVX(bc), udhelpers::TSC(bc), udhelpers::TCE(bc)}};
+    LOGF(debug, "triggers %d %d %d %d %d", triggers[0], triggers[1], triggers[2], triggers[3], triggers[4]);
+    if (bc.has_foundFV0()) {
+      auto fv0 = bc.foundFV0();
+      auto ampA = udhelpers::FV0AmplitudeA(fv0);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, 0);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, triggers[1] ? 1 : 5);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, triggers[2] ? 2 : 6);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, triggers[3] ? 3 : 7);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, triggers[4] ? 4 : 8);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, bc.selection_bit(o2::aod::evsel::kIsBBV0A) ? 9 : 10);
+      getHist(TH2, histdir + "/fv0")->Fill(ampA, bc.selection_bit(o2::aod::evsel::kNoBGV0A) ? 11 : 12);
+    }
+    if (bc.has_foundFT0()) {
+      auto ft0 = bc.foundFT0();
+      auto ampA = udhelpers::FT0AmplitudeA(ft0);
+      auto ampC = udhelpers::FT0AmplitudeC(ft0);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, 0);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, 0);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, triggers[1] ? 1 : 5);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, triggers[1] ? 1 : 5);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, triggers[2] ? 2 : 6);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, triggers[2] ? 2 : 6);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, triggers[3] ? 3 : 7);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, triggers[3] ? 3 : 7);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, triggers[4] ? 4 : 8);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, triggers[4] ? 4 : 8);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, bc.selection_bit(o2::aod::evsel::kIsBBT0A) ? 9 : 10);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, bc.selection_bit(o2::aod::evsel::kIsBBT0C) ? 9 : 10);
+      getHist(TH2, histdir + "/ft0A")->Fill(ampA, bc.selection_bit(o2::aod::evsel::kNoBGT0A) ? 11 : 12);
+      getHist(TH2, histdir + "/ft0C")->Fill(ampC, bc.selection_bit(o2::aod::evsel::kNoBGT0C) ? 11 : 12);
+    }
+    if (bc.has_foundFDD()) {
+      auto fdd = bc.foundFDD();
+      auto ampA = udhelpers::FDDAmplitudeA(fdd);
+      auto ampC = udhelpers::FDDAmplitudeC(fdd);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, 0);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, 0);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, triggers[1] ? 1 : 5);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, triggers[1] ? 1 : 5);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, triggers[2] ? 2 : 6);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, triggers[2] ? 2 : 6);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, triggers[3] ? 3 : 7);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, triggers[3] ? 3 : 7);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, triggers[4] ? 4 : 8);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, triggers[4] ? 4 : 8);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, bc.selection_bit(o2::aod::evsel::kIsBBFDA) ? 9 : 10);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, bc.selection_bit(o2::aod::evsel::kIsBBFDC) ? 9 : 10);
+      getHist(TH2, histdir + "/fddA")->Fill(ampA, bc.selection_bit(o2::aod::evsel::kNoBGFDA) ? 11 : 12);
+      getHist(TH2, histdir + "/fddC")->Fill(ampC, bc.selection_bit(o2::aod::evsel::kNoBGFDC) ? 11 : 12);
+    }
+  }
+
+  template <typename TCol>
+  void processReco(std::string histdir, TCol const& collision, BCs const& bcs,
+                   TCs const& tracks, FWs const& fwdtracks,
+                   aod::FV0As const& fv0as, aod::FT0s const& ft0s, aod::FDDs const& fdds)
   {
     LOGF(debug, "<DGCandProducer>  collision %d", collision.globalIndex());
-    registry.get<TH1>(HIST("reco/Stat"))->Fill(0., 1.);
-
-    // reject collisions at TF boundaries
-    if (rejectAtTFBoundary && !collision.selection_bit(aod::evsel::kNoTimeFrameBorder)) {
-      return;
-    }
-    registry.get<TH1>(HIST("reco/Stat"))->Fill(1., 1.);
+    getHist(TH1, histdir + "/Stat")->Fill(0., 1.);
 
     // nominal BC
     if (!collision.has_foundBC()) {
       return;
     }
-    registry.get<TH1>(HIST("reco/Stat"))->Fill(2., 1.);
-    auto bc = collision.foundBC_as<BCs>();
+    getHist(TH1, histdir + "/Stat")->Fill(1., 1.);
+    auto bc = collision.template foundBC_as<BCs>();
     LOGF(debug, "<DGCandProducer>  BC id %d", bc.globalBC());
+    const uint64_t ts = bc.timestamp();
+    const int runnumber = bc.runNumber();
+    int trs = collision.selection_bit(o2::aod::evsel::kNoCollInTimeRangeStandard) ? 1 : 0;
+    int trofs = collision.selection_bit(o2::aod::evsel::kNoCollInRofStandard) ? 1 : 0;
+    int hmpr = collision.selection_bit(o2::aod::evsel::kNoHighMultCollInPrevRof) ? 1 : 0;
+    int tfb = collision.selection_bit(o2::aod::evsel::kNoTimeFrameBorder) ? 1 : 0;
+    int itsROFb = collision.selection_bit(o2::aod::evsel::kNoITSROFrameBorder) ? 1 : 0;
+    int sbp = collision.selection_bit(o2::aod::evsel::kNoSameBunchPileup) ? 1 : 0;
+    int zVtxFT0vPv = collision.selection_bit(o2::aod::evsel::kIsGoodZvtxFT0vsPV) ? 1 : 0;
+    int vtxITSTPC = collision.selection_bit(o2::aod::evsel::kIsVertexITSTPC) ? 1 : 0;
+    double ir = 0.;
+    if (bc.has_zdc()) {
+      ir = mRateFetcher.fetch(ccdb.service, ts, runnumber, "ZNC hadronic") * 1.e-3;
+    }
+    uint8_t chFT0A = 0;
+    uint8_t chFT0C = 0;
+    uint8_t chFDDA = 0;
+    uint8_t chFDDC = 0;
+    uint8_t chFV0A = 0;
+    int occ = collision.trackOccupancyInTimeRange();
+
+    if (cfgSkimmedProcessing) {
+      // update ccdb setting for zorro
+      if (mRunNumber != bc.runNumber()) {
+        mRunNumber = bc.runNumber();
+        zorro.initCCDB(ccdb.service, bc.runNumber(), bc.timestamp(), triggerName.value);
+        zorro.populateHistRegistry(registry, bc.runNumber());
+      }
+    }
 
     // fill FIT histograms
-    fillFIThistograms(bc);
+    fillFIThistograms(bc, histdir);
 
     // obtain slice of compatible BCs
     auto bcRange = udhelpers::compatibleBCs(collision, diffCuts.NDtcoll(), bcs, diffCuts.minNBCs());
@@ -261,18 +322,28 @@ struct DGCandProducer {
     auto isDGEvent = dgSelector.IsSelected(diffCuts, collision, bcRange, tracks, fwdtracks);
 
     // save DG candidates
-    registry.get<TH1>(HIST("reco/Stat"))->Fill(isDGEvent + 3, 1.);
+    getHist(TH1, histdir + "/Stat")->Fill(isDGEvent + 3, 1.);
     if (isDGEvent == 0) {
       LOGF(debug, "<DGCandProducer>  Data: good collision!");
 
+      if (cfgSkimmedProcessing) {
+        // let zorro do the accounting
+        auto zorroDecision = zorro.isSelected(bc.globalBC());
+        LOGF(info, "<DGCandProducer>  zorroDecision %d", zorroDecision);
+        if (zorroDecision) {
+          getHist(TH1, histdir + "/Stat")->Fill(2, 1.);
+        }
+      }
+
       // fill FITInfo
       upchelpers::FITInfo fitInfo{};
-      udhelpers::getFITinfo(fitInfo, bc.globalBC(), bcs, ft0s, fv0as, fdds);
+      udhelpers::getFITinfo(fitInfo, bc, bcs, ft0s, fv0as, fdds);
 
       // update DG candidates tables
       auto rtrwTOF = udhelpers::rPVtrwTOF<true>(tracks, collision.numContrib());
+      int upc_flag = (collision.flags() & dataformats::Vertex<o2::dataformats::TimeStamp<int>>::Flags::UPCMode) ? 1 : 0;
       outputCollisions(bc.globalBC(), bc.runNumber(),
-                       collision.posX(), collision.posY(), collision.posZ(),
+                       collision.posX(), collision.posY(), collision.posZ(), upc_flag,
                        collision.numContrib(), udhelpers::netCharge<true>(tracks),
                        rtrwTOF);
       outputCollisionsSels(fitInfo.ampFT0A, fitInfo.ampFT0C, fitInfo.timeFT0A, fitInfo.timeFT0C,
@@ -283,17 +354,18 @@ struct DGCandProducer {
                            fitInfo.BBFT0Apf, fitInfo.BBFT0Cpf, fitInfo.BGFT0Apf, fitInfo.BGFT0Cpf,
                            fitInfo.BBFV0Apf, fitInfo.BGFV0Apf,
                            fitInfo.BBFDDApf, fitInfo.BBFDDCpf, fitInfo.BGFDDApf, fitInfo.BGFDDCpf);
+      outputCollisionSelExtras(chFT0A, chFT0C, chFDDA, chFDDC, chFV0A, occ, ir, trs, trofs, hmpr, tfb, itsROFb, sbp, zVtxFT0vPv, vtxITSTPC);
       outputCollsLabels(collision.globalIndex());
 
       // update DGTracks tables
-      for (auto& track : tracks) {
+      for (const auto& track : tracks) {
         if (saveAllTracks || track.isPVContributor()) {
           updateUDTrackTables(outputCollisions.lastIndex(), track, bc.globalBC());
         }
       }
 
       // update DGFwdTracks tables
-      for (auto& fwdtrack : fwdtracks) {
+      for (const auto& fwdtrack : fwdtracks) {
         updateUDFwdTrackTables(fwdtrack, bc.globalBC());
       }
 
@@ -320,7 +392,7 @@ struct DGCandProducer {
         auto cnt = 0;
         float pt1 = 0., pt2 = 0.;
         float signalTPC1 = 0., signalTPC2 = 0.;
-        for (auto tr : tracks) {
+        for (const auto& tr : tracks) {
           if (tr.isPVContributor()) {
             cnt++;
             switch (cnt) {
@@ -336,13 +408,61 @@ struct DGCandProducer {
                  cnt, tr.isGlobalTrack(), tr.pt(), tr.itsNCls(), tr.tpcNClsCrossedRows(), tr.hasTRD(), tr.hasTOF());
           }
         }
-        registry.get<TH2>(HIST("reco/pt1Vspt2"))->Fill(pt1, pt2);
-        registry.get<TH2>(HIST("reco/TPCsignal1"))->Fill(pt1, signalTPC1);
-        registry.get<TH2>(HIST("reco/TPCsignal2"))->Fill(pt2, signalTPC2);
-        registry.get<TH2>(HIST("reco/sig1VsSig2TPC"))->Fill(signalTPC1, signalTPC2);
+        getHist(TH2, histdir + "/pt1Vspt2")->Fill(pt1, pt2);
+        getHist(TH2, histdir + "/TPCsignal1")->Fill(pt1, signalTPC1);
+        getHist(TH2, histdir + "/TPCsignal2")->Fill(pt2, signalTPC2);
+        getHist(TH2, histdir + "/sig1VsSig2TPC")->Fill(signalTPC1, signalTPC2);
       }
     }
   }
+
+  void init(InitContext& context)
+  {
+    // initialize zorro
+    mRunNumber = -1;
+    zorroSummary.setObject(zorro.getZorroSummary());
+    zorro.setBaseCCDBPath(cfgZorroCCDBpath.value);
+    ccdb->setURL(cfgCCDBurl);
+    ccdb->setCaching(true);
+    ccdb->setLocalObjectValidityChecking();
+    ccdb->setFatalWhenNull(false);
+
+    // DGCuts
+    diffCuts = (DGCutparHolder)DGCuts;
+
+    // add histograms for the different process functions
+    histPointers.clear();
+    if (context.mOptions.get<bool>("processData")) {
+      createHistograms("reco");
+    }
+    if (context.mOptions.get<bool>("processMcData")) {
+      createHistograms("MCreco");
+    }
+  }
+
+  // process function for reconstructed data
+  void processData(CC const& collision, BCs const& bcs, TCs const& tracks, FWs const& fwdtracks,
+                   aod::Zdcs const& /*zdcs*/, aod::FV0As const& fv0as, aod::FT0s const& ft0s, aod::FDDs const& fdds)
+  {
+    processReco(std::string("reco"), collision, bcs, tracks, fwdtracks, fv0as, ft0s, fdds);
+  }
+  PROCESS_SWITCH(DGCandProducer, processData, "Produce UD table with data", true);
+
+  // process function for reconstructed MC data
+  void processMcData(MCCC const& collision, aod::McCollisions const& /*mccollisions*/, BCs const& bcs,
+                     TCs const& tracks, FWs const& fwdtracks, aod::Zdcs const& /*zdcs*/, aod::FV0As const& fv0as,
+                     aod::FT0s const& ft0s, aod::FDDs const& fdds)
+  {
+    // select specific processes with the GeneratorID
+    auto mccol = collision.mcCollision();
+    LOGF(debug, "GeneratorId %d (%d)", mccol.getGeneratorId(), generatorIds->size());
+
+    if (std::find(generatorIds->begin(), generatorIds->end(), mccol.getGeneratorId()) != generatorIds->end()) {
+      LOGF(debug, "Event with good generatorId");
+      processReco(std::string("MCreco"), collision, bcs, tracks, fwdtracks, fv0as, ft0s, fdds);
+    }
+  }
+  PROCESS_SWITCH(DGCandProducer, processMcData, "Produce UD tables with MC data", false);
 };
 
 struct McDGCandProducer {
@@ -351,6 +471,9 @@ struct McDGCandProducer {
   Produces<aod::UDMcParticles> outputMcParticles;
   Produces<aod::UDMcCollsLabels> outputMcCollsLabels;
   Produces<aod::UDMcTrackLabels> outputMcTrackLabels;
+
+  // save all McTruth, even if the collisions is not reconstructed
+  Configurable<bool> saveAllMcCollisions{"saveAllMcCollisions", true, "save all McCollisions"};
 
   using CCs = soa::Join<aod::Collisions, aod::EvSels, aod::McCollisionLabels>;
   using BCs = soa::Join<aod::BCsWithTimestamps, aod::BcSels, aod::Run3MatchedToBCSparse>;
@@ -371,8 +494,10 @@ struct McDGCandProducer {
   template <typename TMcCollision>
   void updateUDMcCollisions(TMcCollision const& mccol)
   {
+    LOGF(debug, "<updateUDMcCollisions>");
     // save mccol
-    outputMcCollisions(mccol.bcId(),
+    auto bc = mccol.template bc_as<BCs>();
+    outputMcCollisions(bc.globalBC(),
                        mccol.generatorsID(),
                        mccol.posX(),
                        mccol.posY(),
@@ -385,6 +510,8 @@ struct McDGCandProducer {
   template <typename TMcParticle>
   void updateUDMcParticle(TMcParticle const& McPart, int64_t McCollisionId, std::map<int64_t, int64_t>& mcPartIsSaved)
   {
+    LOGF(debug, "<updateUDMcParticle> McCollisionId %d", McCollisionId);
+
     // save McPart
     // mother and daughter indices are set to -1
     // ATTENTION: this can be improved to also include mother and daughter indices
@@ -411,38 +538,75 @@ struct McDGCandProducer {
   template <typename TMcParticles>
   void updateUDMcParticles(TMcParticles const& McParts, int64_t McCollisionId, std::map<int64_t, int64_t>& mcPartIsSaved)
   {
+    LOGF(debug, "<updateUDMcParticles> number of McParticles %d", McParts.size());
+    LOGF(debug, "                      McCollisionId %d", McCollisionId);
+
+    /*
+    LOGF(info, "PStack");
+    for (auto const& part : McParts) {
+      LOGF(info, "P - Id %d PID %d", part.globalIndex(), part.pdgCode());
+      for (auto const& mother : part.template mothers_as<aod::McParticles>()) {
+        LOGF(info, "  M - Id %d PID %d", mother.globalIndex(), mother.pdgCode());
+      }
+      for (auto const& daughter : part.template daughters_as<aod::McParticles>()) {
+        LOGF(info, "  D - Id %d PID %d", daughter.globalIndex(), daughter.pdgCode());
+      }
+    }
+    LOGF(info, "");
+    */
+
     // save McParts
     // new mother and daughter ids
     std::vector<int32_t> newmids;
     int32_t newdids[2] = {-1, -1};
     int64_t newval = -1;
 
+    // Determine the particle indices within the UDMcParticles table
+    // before filling the table
+    // This is needed to be able to assign the new daughter indices
+    std::map<int64_t, int64_t> oldnew;
+    auto lastId = outputMcParticles.lastIndex();
+    for (const auto& mcpart : McParts) {
+      auto oldId = mcpart.globalIndex();
+      if (mcPartIsSaved.find(oldId) != mcPartIsSaved.end()) {
+        oldnew[oldId] = mcPartIsSaved[oldId];
+      } else {
+        lastId++;
+        oldnew[oldId] = lastId;
+      }
+    }
+
     // all particles of the McCollision are saved
-    for (auto mcpart : McParts) {
+    for (const auto& mcpart : McParts) {
+      LOGF(debug, "  p (%d) %d", mcpart.pdgCode(), mcpart.globalIndex());
       if (mcPartIsSaved.find(mcpart.globalIndex()) == mcPartIsSaved.end()) {
-        // correct mother and daughter IDs
+        // mothers
         newmids.clear();
         auto oldmids = mcpart.mothersIds();
-        for (uint ii = 0; ii < oldmids.size(); ii++) {
-          if (mcPartIsSaved.find(oldmids[ii]) != mcPartIsSaved.end()) {
-            newval = mcPartIsSaved[oldmids[ii]];
-            LOGF(debug, " mid %i / %i", oldmids[ii], newval);
+        for (const auto& oldmid : oldmids) {
+          auto m = McParts.rawIteratorAt(oldmid);
+          LOGF(debug, "    m %d", m.globalIndex());
+          if (mcPartIsSaved.find(oldmid) != mcPartIsSaved.end()) {
+            newval = mcPartIsSaved[oldmid];
           } else {
             newval = -1;
           }
+          LOGF(debug, "    mid o %i n %i", oldmid, newval);
           newmids.push_back(newval);
         }
+
+        // daughters
         auto olddids = mcpart.daughtersIds();
         for (uint ii = 0; ii < olddids.size(); ii++) {
-          if (mcPartIsSaved.find(olddids[ii]) != mcPartIsSaved.end()) {
-            newval = mcPartIsSaved[olddids[ii]];
-            LOGF(debug, " did %i / %i", olddids[ii], newval);
+          if (oldnew.find(olddids[ii]) != oldnew.end()) {
+            newval = oldnew[olddids[ii]];
           } else {
             newval = -1;
           }
+          LOGF(debug, "    did o %i n %i", olddids[ii], newval);
           newdids[ii] = newval;
         }
-        LOGF(debug, " ms %i ds %i", oldmids.size(), olddids.size());
+        LOGF(debug, "    ms %i ds %i", oldmids.size(), olddids.size());
 
         // update UDMcParticles
         outputMcParticles(McCollisionId,
@@ -457,6 +621,7 @@ struct McDGCandProducer {
                           mcpart.pz(),
                           mcpart.e());
         mcPartIsSaved[mcpart.globalIndex()] = outputMcParticles.lastIndex();
+        LOGF(debug, "  mcpart %d -> udmcpart %d", mcpart.globalIndex(), mcPartIsSaved[mcpart.globalIndex()]);
       }
     }
   }
@@ -487,7 +652,7 @@ struct McDGCandProducer {
   void updateUDMcTrackLabels(TTrack const& udtracks, std::map<int64_t, int64_t>& mcPartIsSaved)
   {
     // loop over all tracks
-    for (auto udtrack : udtracks) {
+    for (const auto& udtrack : udtracks) {
       // udtrack (UDTCs) -> track (TCs) -> mcTrack (McParticles) -> udMcTrack (UDMcParticles)
       auto trackId = udtrack.trackId();
       if (trackId >= 0) {
@@ -508,30 +673,10 @@ struct McDGCandProducer {
     }
   }
 
-  void init(InitContext& context)
+  // updating McTruth data and links to reconstructed data
+  void procWithDgCand(aod::McCollisions const& mccols, aod::McParticles const& mcparts,
+                      UDCCs const& dgcands, UDTCs const& udtracks)
   {
-    // add histograms for the different process functions
-    if (context.mOptions.get<bool>("processMC")) {
-      registry.add("mcTruth/collisions", "Number of associated collisions", {HistType::kTH1F, {{11, -0.5, 10.5}}});
-      registry.add("mcTruth/collType", "Collision type", {HistType::kTH1F, {{5, -0.5, 4.5}}});
-      registry.add("mcTruth/IVMpt", "Invariant mass versus p_{T}", {HistType::kTH2F, {{150, 0.0, 3.0}, {150, 0.0, 3.0}}});
-    }
-  }
-
-  // process function for MC data
-  // save the MC truth of all events of interest and of the DG events
-  void processMC(aod::McCollisions const& mccols, aod::McParticles const& mcparts,
-                 UDCCs const& dgcands, UDTCs const& udtracks,
-                 CCs const& /*collisions*/, BCs const& /*bcs*/, TCs const& /*tracks*/)
-  {
-    LOGF(info, "Number of McCollisions %d", mccols.size());
-    LOGF(info, "Number of DG candidates %d", dgcands.size());
-    LOGF(info, "Number of UD tracks %d", udtracks.size());
-    if (dgcands.size() <= 0) {
-      LOGF(info, "No DG candidates to save!");
-      return;
-    }
-
     // use a hash table to keep track of the McCollisions which have been added to the UDMcCollision table
     // {McCollisionId : udMcCollisionId}
     // similar for the McParticles which have been added to the UDMcParticle table
@@ -541,36 +686,41 @@ struct McDGCandProducer {
 
     // loop over McCollisions and UDCCs simultaneously
     auto mccol = mccols.iteratorAt(0);
-    auto dgcand = dgcands.iteratorAt(0);
     auto lastmccol = mccols.iteratorAt(mccols.size() - 1);
+    auto mccolAtEnd = false;
+
+    auto dgcand = dgcands.iteratorAt(0);
     auto lastdgcand = dgcands.iteratorAt(dgcands.size() - 1);
+    auto dgcandAtEnd = false;
 
     // advance dgcand and mccol until both are AtEnd
     int64_t mccolId = mccol.globalIndex();
     int64_t mcdgId = -1;
-    auto dgcandAtEnd = dgcand == lastdgcand;
-    auto mccolAtEnd = mccol == lastmccol;
+    int64_t colId = -1;
+
     bool goon = true;
     while (goon) {
-      // check if dgcand has an associated McCollision
-      if (!dgcand.has_collision()) {
-        mcdgId = -1;
-      } else {
+      // check if dgcand has an associated Collision and McCollision
+      if (dgcand.has_collision()) {
         auto dgcandCol = dgcand.collision_as<CCs>();
-        if (!dgcandCol.has_mcCollision()) {
-          mcdgId = -1;
-        } else {
+        colId = dgcandCol.globalIndex();
+        if (dgcandCol.has_mcCollision()) {
           mcdgId = dgcandCol.mcCollision().globalIndex();
+        } else {
+          mcdgId = -1;
         }
+      } else {
+        colId = -1;
+        mcdgId = -1;
       }
-      LOGF(info, "\nStart of loop mcdgId %d mccolId %d", mcdgId, mccolId);
+      LOGF(debug, "");
+      LOGF(debug, "dgcand %d mcdgId %d colId %d mccolId %d - UDMcCollsLabels %d UDMcCollisions %d", dgcand.globalIndex(), mcdgId, colId, mccolId, outputMcCollsLabels.lastIndex(), outputMcCollisions.lastIndex());
 
       // two cases to consider
-      // 1. the event to process is a dgcand. In this case the Mc tables as well as the McLabel tables are updated
-      // 2. the event to process is an event of interest. In this case only the Mc tables are updated
+      // 1. mcdgId <= mccolId: the event to process is a dgcand. In this case the Mc tables as well as the McLabel tables are updated
+      // 2. mccolId < mcdgId: the event to process is an MC event of interest without reconstructed dgcand. In this case only the Mc tables are updated
       if ((!dgcandAtEnd && !mccolAtEnd && (mcdgId <= mccolId)) || mccolAtEnd) {
         // this is case 1.
-        LOGF(info, "Doing case 1 with mcdgId %d", mcdgId);
 
         // update UDMcCollisions and UDMcColsLabels (for each UDCollision -> UDMcCollisions)
         // update UDMcParticles and UDMcTrackLabels (for each UDTrack -> UDMcParticles)
@@ -581,14 +731,15 @@ struct McDGCandProducer {
         // McParticles are saved
         if (mcdgId >= 0) {
           if (mcColIsSaved.find(mcdgId) == mcColIsSaved.end()) {
-            LOGF(info, "  Saving McCollision %d", mcdgId);
             // update UDMcCollisions
+            LOGF(debug, "  writing mcCollision %d to UDMcCollisions", mcdgId);
             auto dgcandMcCol = dgcand.collision_as<CCs>().mcCollision();
             updateUDMcCollisions(dgcandMcCol);
             mcColIsSaved[mcdgId] = outputMcCollisions.lastIndex();
           }
 
           // update UDMcColsLabels (for each UDCollision -> UDMcCollisions)
+          LOGF(debug, "  writing %d to outputMcCollsLabels", mcColIsSaved[mcdgId]);
           outputMcCollsLabels(mcColIsSaved[mcdgId]);
 
           // update UDMcParticles
@@ -601,19 +752,24 @@ struct McDGCandProducer {
         } else {
           // If the dgcand has no associated McCollision then only the McParticles which are associated
           // with the tracks of the dgcand are saved
-          LOGF(info, "  Saving McCollision %d", -1);
 
           // update UDMcColsLabels (for each UDCollision -> UDMcCollisions)
+          LOGF(debug, "  writing %d to UDMcCollsLabels", -1);
           outputMcCollsLabels(-1);
 
           // update UDMcParticles and UDMcTrackLabels (for each UDTrack -> UDMcParticles)
           // loop over tracks of dgcand
-          for (auto dgtrack : dgTracks) {
+          for (const auto& dgtrack : dgTracks) {
             if (dgtrack.has_track()) {
               auto track = dgtrack.track_as<TCs>();
               if (track.has_mcParticle()) {
                 auto mcPart = track.mcParticle();
-                updateUDMcParticle(mcPart, -1, mcPartIsSaved);
+                auto mcCol = mcPart.mcCollision();
+                if (mcColIsSaved.find(mcCol.globalIndex()) == mcColIsSaved.end()) {
+                  updateUDMcCollisions(mcCol);
+                  mcColIsSaved[mcCol.globalIndex()] = outputMcCollisions.lastIndex();
+                }
+                updateUDMcParticle(mcPart, mcColIsSaved[mcCol.globalIndex()], mcPartIsSaved);
                 updateUDMcTrackLabel(dgtrack, mcPartIsSaved);
               } else {
                 outputMcTrackLabels(-1, track.mcMask());
@@ -631,12 +787,12 @@ struct McDGCandProducer {
         }
       } else {
         // this is case 2.
-        LOGF(info, "Doing case 2");
 
         // update UDMcCollisions and UDMcParticles
         if (mcColIsSaved.find(mccolId) == mcColIsSaved.end()) {
-          LOGF(info, "  Saving McCollision %d", mccolId);
+
           // update UDMcCollisions
+          LOGF(debug, "  writing mcCollision %d to UDMcCollisions", mccolId);
           updateUDMcCollisions(mccol);
           mcColIsSaved[mccolId] = outputMcCollisions.lastIndex();
 
@@ -653,12 +809,72 @@ struct McDGCandProducer {
           mccolAtEnd = true;
         }
       }
-
+      LOGF(info, "  UDMcCollsLabels %d (of %d) UDMcCollisions %d", outputMcCollsLabels.lastIndex(), dgcands.size() - 1, outputMcCollisions.lastIndex());
       goon = !dgcandAtEnd || !mccolAtEnd;
-      LOGF(info, "End of loop mcdgId %d mccolId %d", mcdgId, mccolId);
     }
   }
-  PROCESS_SWITCH(McDGCandProducer, processMC, "Produce MC tables", false);
+
+  // updating McTruth data only
+  void procWithoutDgCand(aod::McCollisions const& mccols, aod::McParticles const& mcparts)
+  {
+    // use a hash table to keep track of the McCollisions which have been added to the UDMcCollision table
+    // {McCollisionId : udMcCollisionId}
+    // similar for the McParticles which have been added to the UDMcParticle table
+    // {McParticleId : udMcParticleId}
+    std::map<int64_t, int64_t> mcColIsSaved;
+    std::map<int64_t, int64_t> mcPartIsSaved;
+
+    // loop over McCollisions
+    for (auto const& mccol : mccols) {
+      int64_t mccolId = mccol.globalIndex();
+
+      // update UDMcCollisions and UDMcParticles
+      if (mcColIsSaved.find(mccolId) == mcColIsSaved.end()) {
+
+        // update UDMcCollisions
+        LOGF(debug, "  writing mcCollision %d to UDMcCollisions", mccolId);
+        updateUDMcCollisions(mccol);
+        mcColIsSaved[mccolId] = outputMcCollisions.lastIndex();
+
+        // update UDMcParticles
+        auto mcPartsSlice = mcparts.sliceBy(mcPartsPerMcCollision, mccolId);
+        updateUDMcParticles(mcPartsSlice, mcColIsSaved[mccolId], mcPartIsSaved);
+      }
+    }
+  }
+
+  void init(InitContext& context)
+  {
+    // add histograms for the different process functions
+    if (context.mOptions.get<bool>("processMCTruth")) {
+      LOGF(info, "Preparing histograms for processMCTruth.");
+      registry.add("mcTruth/collisions", "Number of associated collisions", {HistType::kTH1F, {{11, -0.5, 10.5}}});
+      registry.add("mcTruth/collType", "Collision type", {HistType::kTH1F, {{5, -0.5, 4.5}}});
+      registry.add("mcTruth/IVMpt", "Invariant mass versus p_{T}", {HistType::kTH2F, {{150, 0.0, 3.0}, {150, 0.0, 3.0}}});
+    }
+  }
+
+  // process function for MC data
+  // save the MC truth of all events of interest and of the DG events
+  void processMCTruth(aod::McCollisions const& mccols, aod::McParticles const& mcparts,
+                      UDCCs const& dgcands, UDTCs const& udtracks,
+                      CCs const& /*collisions*/, BCs const& /*bcs*/, TCs const& /*tracks*/)
+  {
+    LOGF(info, "Number of McCollisions %d", mccols.size());
+    LOGF(info, "Number of DG candidates %d", dgcands.size());
+    LOGF(info, "Number of UD tracks %d", udtracks.size());
+
+    if (mccols.size() > 0) {
+      if (dgcands.size() > 0) {
+        procWithDgCand(mccols, mcparts, dgcands, udtracks);
+      } else {
+        if (saveAllMcCollisions) {
+          procWithoutDgCand(mccols, mcparts);
+        }
+      }
+    }
+  }
+  PROCESS_SWITCH(McDGCandProducer, processMCTruth, "Produce MC tables", false);
 
   void processDummy(aod::Collisions const& /*collisions*/)
   {

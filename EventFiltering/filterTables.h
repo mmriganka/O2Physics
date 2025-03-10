@@ -15,17 +15,46 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
-#include "Framework/AnalysisDataModel.h"
+#include <cstdint>
+
+namespace o2::aod
+{
+template <uint32_t T>
+struct Hash;
+}
+
+#include "Framework/ASoA.h"
+
+namespace o2::soa
+{
+template <typename T>
+  requires(!std::same_as<typename o2::aod::MetadataTrait<std::decay_t<T>>::metadata, void>)
+const char* getTableLabel()
+{
+  return o2::aod::MetadataTrait<std::decay_t<T>>::metadata::tableLabel();
+}
+
+template <typename T>
+  requires requires { T::ref.label_hash; }
+const char* getTableLabel()
+{
+  return o2::aod::Hash<T::ref.label_hash>::str;
+}
+} // namespace o2::soa
 
 namespace o2::aod
 {
 namespace filtering
 {
-DECLARE_SOA_COLUMN(He, hasHe, bool);             //!
+DECLARE_SOA_COLUMN(H2, hasH2, bool);             //! deuteron trigger for the helium normalisation (to be downscaled)
+DECLARE_SOA_COLUMN(He, hasHe, bool);             //! helium
 DECLARE_SOA_COLUMN(H3L3Body, hasH3L3Body, bool); //! hypertriton 3body
+DECLARE_SOA_COLUMN(ITSextremeIonisation, hasITSextremeIonisation, bool); //! ITS extreme ionisation
+DECLARE_SOA_COLUMN(ITSmildIonisation, hasITSmildIonisation, bool);       //! ITS mild ionisation (normalisation of the extreme ionisation), to be downscaled
 
 // diffraction
-DECLARE_SOA_COLUMN(UDdiff, hasDiff, bool); //! Double Gap events, DG
+DECLARE_SOA_COLUMN(UDdiffSmall, hasDiffSmall, bool); //! Double Gap events, <= 3 prongs
+DECLARE_SOA_COLUMN(UDdiffLarge, hasDiffLarge, bool); //! Double Gap events, >= 4 prongs
 
 DECLARE_SOA_COLUMN(UDdiffBC, hasDiffBC, bool); //! diffractive BC
 
@@ -38,34 +67,47 @@ DECLARE_SOA_COLUMN(DiMuon, hasDiMuon, bool);             //! dimuon trigger with
 // EM dielectrons
 DECLARE_SOA_COLUMN(LMeeIMR, hasLMeeIMR, bool); //! dielectron trigger for intermediate mass region
 DECLARE_SOA_COLUMN(LMeeHMR, hasLMeeHMR, bool); //! dielectron trigger for high mass region
+// Electron-muon pair
+DECLARE_SOA_COLUMN(ElectronMuon, hasElectronMuon, bool); //! dimuon trigger with low pT on muons
 
 // heavy flavours
-DECLARE_SOA_COLUMN(HfHighPt2P, hasHfHighPt2P, bool);                 //! high-pT 2-prong charm hadron
-DECLARE_SOA_COLUMN(HfHighPt3P, hasHfHighPt3P, bool);                 //! high-pT 3-prong charm hadron
-DECLARE_SOA_COLUMN(HfBeauty3P, hasHfBeauty3P, bool);                 //! 3-prong beauty hadron
-DECLARE_SOA_COLUMN(HfBeauty4P, hasHfBeauty4P, bool);                 //! 4-prong beauty hadron
-DECLARE_SOA_COLUMN(HfFemto2P, hasHfFemto2P, bool);                   //! 2-prong charm-hadron - N pair
-DECLARE_SOA_COLUMN(HfFemto3P, hasHfFemto3P, bool);                   //! 3-prong charm-hadron - N pair
-DECLARE_SOA_COLUMN(HfDoubleCharm2P, hasHfDoubleCharm2P, bool);       //! at least two 2-prong charm-hadron candidates
-DECLARE_SOA_COLUMN(HfDoubleCharm3P, hasHfDoubleCharm3P, bool);       //! at least two 3-prong charm-hadron candidates
-DECLARE_SOA_COLUMN(HfDoubleCharmMix, hasHfDoubleCharmMix, bool);     //! at least one 2-prong and one 3-prong charm-hadron candidates
-DECLARE_SOA_COLUMN(HfV0Charm2P, hasHfV0Charm2P, bool);               //! V0 with 2-prong charm hadron
-DECLARE_SOA_COLUMN(HfV0Charm3P, hasHfV0Charm3P, bool);               //! V0 with 3-prong charm hadron
-DECLARE_SOA_COLUMN(HfCharmBarToXiBach, hasHfCharmBarToXiBach, bool); //! Charm baryon to Xi + bachelor
-DECLARE_SOA_COLUMN(HfSigmaCPPK, hasHfSigmaCPPK, bool);               //! SigmaC(2455)++K- and SigmaC(2520)++K- + c.c.
-DECLARE_SOA_COLUMN(HfSigmaC0K0, hasHfSigmaC0K0, bool);               //! SigmaC(2455)0KS0 and SigmaC(2520)0KS0
-DECLARE_SOA_COLUMN(HfPhotonCharm2P, hasHfPhotonCharm2P, bool);       //! photon with 2-prong charm hadron
-DECLARE_SOA_COLUMN(HfPhotonCharm3P, hasHfPhotonCharm3P, bool);       //! photon with 3-prong charm hadron
+DECLARE_SOA_COLUMN(HfHighPt2P, hasHfHighPt2P, bool);                             //! high-pT 2-prong charm hadron
+DECLARE_SOA_COLUMN(HfHighPt3P, hasHfHighPt3P, bool);                             //! high-pT 3-prong charm hadron
+DECLARE_SOA_COLUMN(HfBeauty3P, hasHfBeauty3P, bool);                             //! 3-prong beauty hadron
+DECLARE_SOA_COLUMN(HfBeauty4P, hasHfBeauty4P, bool);                             //! 4-prong beauty hadron
+DECLARE_SOA_COLUMN(HfFemto2P, hasHfFemto2P, bool);                               //! 2-prong charm-hadron - N pair
+DECLARE_SOA_COLUMN(HfFemto3P, hasHfFemto3P, bool);                               //! 3-prong charm-hadron - N pair
+DECLARE_SOA_COLUMN(HfDoubleCharm2P, hasHfDoubleCharm2P, bool);                   //! at least two 2-prong charm-hadron candidates
+DECLARE_SOA_COLUMN(HfDoubleCharm3P, hasHfDoubleCharm3P, bool);                   //! at least two 3-prong charm-hadron candidates
+DECLARE_SOA_COLUMN(HfDoubleCharmMix, hasHfDoubleCharmMix, bool);                 //! at least one 2-prong and one 3-prong charm-hadron candidates
+DECLARE_SOA_COLUMN(HfV0Charm2P, hasHfV0Charm2P, bool);                           //! V0 with 2-prong charm hadron
+DECLARE_SOA_COLUMN(HfV0Charm3P, hasHfV0Charm3P, bool);                           //! V0 with 3-prong charm hadron
+DECLARE_SOA_COLUMN(HfCharmBarToXiBach, hasHfCharmBarToXiBach, bool);             //! Charm baryon to Xi + bachelor
+DECLARE_SOA_COLUMN(HfCharmBarToXi2Bach, hasHfCharmBarToXi2Bach, bool);           //! Charm baryon to Xi + 2 bachelors
+DECLARE_SOA_COLUMN(HfSigmaCPPK, hasHfSigmaCPPK, bool);                           //! SigmaC(2455)++K- and SigmaC(2520)++K- + c.c.
+DECLARE_SOA_COLUMN(HfSigmaC0K0, hasHfSigmaC0K0, bool);                           //! SigmaC(2455)0KS0 and SigmaC(2520)0KS0
+DECLARE_SOA_COLUMN(HfPhotonCharm2P, hasHfPhotonCharm2P, bool);                   //! photon with 2-prong charm hadron
+DECLARE_SOA_COLUMN(HfPhotonCharm3P, hasHfPhotonCharm3P, bool);                   //! photon with 3-prong charm hadron
+DECLARE_SOA_COLUMN(HfSingleCharm2P, hasHfSingleCharm2P, bool);                   //! 2-prong charm hadron (for efficiency studies)
+DECLARE_SOA_COLUMN(HfSingleCharm3P, hasHfSingleCharm3P, bool);                   //! 3-prong charm hadron (for efficiency studies)
+DECLARE_SOA_COLUMN(HfSingleNonPromptCharm2P, hasHfSingleNonPromptCharm2P, bool); //! 2-prong charm hadron (for efficiency studies)
+DECLARE_SOA_COLUMN(HfSingleNonPromptCharm3P, hasHfSingleNonPromptCharm3P, bool); //! 3-prong charm hadron (for efficiency studies)
+DECLARE_SOA_COLUMN(HfBtoJPsiKa, hasHfBtoJPsiKa, bool);                           //! B+ -> JPsi(->mumu)K+
+DECLARE_SOA_COLUMN(HfBtoJPsiKstar, hasHfBtoJPsiKstar, bool);                     //! B0 -> JPsi(->mumu)K*+(->Kpi)
+DECLARE_SOA_COLUMN(HfBtoJPsiPhi, hasHfBtoJPsiPhi, bool);                         //! B0s -> JPsi(->mumu)phi(->KK)
+DECLARE_SOA_COLUMN(HfBtoJPsiPrKa, hasHfBtoJPsiPrKa, bool);                       //! Lb -> JPsi(->mumu)pK+
+DECLARE_SOA_COLUMN(HfBtoJPsiPi, hasHfBtoJPsiPi, bool);                           //! Bc -> JPsi(->mumu)pi+
 
 // CF two body triggers
 DECLARE_SOA_COLUMN(PD, hasPD, bool); //! has d-p pair
 DECLARE_SOA_COLUMN(LD, hasLD, bool); //! has l-d pair
 
 // CF three body triggers
-DECLARE_SOA_COLUMN(PPP, hasPPP, bool); //! has p-p-p triplet
-DECLARE_SOA_COLUMN(PPL, hasPPL, bool); //! has p-p-L triplet
-DECLARE_SOA_COLUMN(PLL, hasPLL, bool); //! has p-L-L triplet
-DECLARE_SOA_COLUMN(LLL, hasLLL, bool); //! has L-L-L tripletD
+DECLARE_SOA_COLUMN(PPP, hasPPP, bool);     //! has p-p-p triplet
+DECLARE_SOA_COLUMN(PPL, hasPPL, bool);     //! has p-p-L triplet
+DECLARE_SOA_COLUMN(PLL, hasPLL, bool);     //! has p-L-L triplet
+DECLARE_SOA_COLUMN(LLL, hasLLL, bool);     //! has L-L-L tripletD
+DECLARE_SOA_COLUMN(PPPHI, hasPPPHI, bool); //! has P-P-PHI triplet
 
 // jets
 DECLARE_SOA_COLUMN(JetChLowPt, hasJetChLowPt, bool);   //! low-pT charged jet
@@ -100,6 +142,8 @@ DECLARE_SOA_COLUMN(hadronOmega, hashadronOmega, bool);           //! at least 1 
 DECLARE_SOA_COLUMN(DoubleXi, hasDoubleXi, bool);                 //! at least 2 Xi
 DECLARE_SOA_COLUMN(TripleXi, hasTripleXi, bool);                 //! at least 3 Xi
 DECLARE_SOA_COLUMN(QuadrupleXi, hasQuadrupleXi, bool);           //! at least 4 Xi
+DECLARE_SOA_COLUMN(DoubleOmega, hasDoubleOmega, bool);           //! at least 2 Omega
+DECLARE_SOA_COLUMN(OmegaXi, hasOmegaXi, bool);                   //! at least 1 Omega + 1 Xi
 DECLARE_SOA_COLUMN(SingleXiYN, hasSingleXiYN, bool);             //! at least 1 Xi with high radius (YN interactions)
 DECLARE_SOA_COLUMN(OmegaLargeRadius, hasOmegaLargeRadius, bool); //! at least 1 Omega with high radius
 DECLARE_SOA_COLUMN(TrackedCascade, hasTrackedCascade, bool);     //! at least 1 tracked cascade
@@ -156,12 +200,13 @@ DECLARE_SOA_COLUMN(BCend, hasBCend, uint64_t);     //! CEFP bcrange
 
 // nuclei
 DECLARE_SOA_TABLE(NucleiFilters, "AOD", "NucleiFilters", //!
-                  filtering::He, filtering::H3L3Body);
+                  filtering::H2, filtering::He, filtering::H3L3Body, filtering::ITSmildIonisation,
+                  filtering::ITSextremeIonisation);
 using NucleiFilter = NucleiFilters::iterator;
 
 // diffraction
 DECLARE_SOA_TABLE(DiffractionFilters, "AOD", "DiffFilters", //! Diffraction filters (Collisions)
-                  filtering::UDdiff);
+                  filtering::UDdiffSmall, filtering::UDdiffLarge);
 using DiffractionFilter = DiffractionFilters::iterator;
 
 DECLARE_SOA_TABLE(DiffractionBCFilters, "AOD", "DiffBCFilters", //! Diffraction filters (BCs)
@@ -170,17 +215,42 @@ using DiffractionBCFilter = DiffractionBCFilters::iterator;
 
 // Dileptons & Quarkonia
 DECLARE_SOA_TABLE(DqFilters, "AOD", "DqFilters", //!
-                  filtering::SingleE, filtering::LMeeIMR, filtering::LMeeHMR, filtering::DiElectron, filtering::SingleMuLow, filtering::SingleMuHigh, filtering::DiMuon);
+                  filtering::SingleE, filtering::LMeeIMR, filtering::LMeeHMR, filtering::DiElectron, filtering::SingleMuLow, filtering::SingleMuHigh, filtering::DiMuon, filtering::ElectronMuon);
 using DqFilter = DqFilters::iterator;
 
 // heavy flavours
 DECLARE_SOA_TABLE(HfFilters, "AOD", "HfFilters", //!
-                  filtering::HfHighPt2P, filtering::HfHighPt3P, filtering::HfBeauty3P, filtering::HfBeauty4P, filtering::HfFemto2P, filtering::HfFemto3P, filtering::HfDoubleCharm2P, filtering::HfDoubleCharm3P, filtering::HfDoubleCharmMix, filtering::HfV0Charm2P, filtering::HfV0Charm3P, filtering::HfCharmBarToXiBach, filtering::HfSigmaCPPK, filtering::HfSigmaC0K0, filtering::HfPhotonCharm2P, filtering::HfPhotonCharm3P);
+                  filtering::HfHighPt2P,
+                  filtering::HfHighPt3P,
+                  filtering::HfBeauty3P,
+                  filtering::HfBeauty4P,
+                  filtering::HfFemto2P,
+                  filtering::HfFemto3P,
+                  filtering::HfDoubleCharm2P,
+                  filtering::HfDoubleCharm3P,
+                  filtering::HfDoubleCharmMix,
+                  filtering::HfV0Charm2P,
+                  filtering::HfV0Charm3P,
+                  filtering::HfCharmBarToXiBach,
+                  filtering::HfSigmaCPPK,
+                  filtering::HfSigmaC0K0,
+                  filtering::HfPhotonCharm2P,
+                  filtering::HfPhotonCharm3P,
+                  filtering::HfSingleCharm2P,
+                  filtering::HfSingleCharm3P,
+                  filtering::HfSingleNonPromptCharm2P,
+                  filtering::HfSingleNonPromptCharm3P,
+                  filtering::HfCharmBarToXi2Bach,
+                  filtering::HfBtoJPsiKa,
+                  filtering::HfBtoJPsiKstar,
+                  filtering::HfBtoJPsiPhi,
+                  filtering::HfBtoJPsiPrKa,
+                  filtering::HfBtoJPsiPi);
 
 using HfFilter = HfFilters::iterator;
 
 DECLARE_SOA_TABLE(CFFilters, "AOD", "CFFilters", //!
-                  filtering::PPP, filtering::PPL, filtering::PLL, filtering::LLL, filtering::PD, filtering::LD);
+                  filtering::PPP, filtering::PPL, filtering::PLL, filtering::LLL, filtering::PPPHI, filtering::PD, filtering::LD);
 using CfFilter = CFFilters::iterator;
 
 // jets
@@ -207,7 +277,7 @@ using FullJetFilter = FullJetFilters::iterator;
 
 // strangeness (lf)
 DECLARE_SOA_TABLE(StrangenessFilters, "AOD", "LFStrgFilters", //!
-                  filtering::Omega, filtering::hadronOmega, filtering::DoubleXi, filtering::TripleXi, filtering::QuadrupleXi, filtering::SingleXiYN, filtering::OmegaLargeRadius, filtering::TrackedXi, filtering::TrackedOmega, filtering::OmegaHighMult);
+                  filtering::Omega, filtering::hadronOmega, filtering::DoubleXi, filtering::TripleXi, filtering::QuadrupleXi, filtering::SingleXiYN, filtering::OmegaLargeRadius, filtering::TrackedXi, filtering::TrackedOmega, filtering::OmegaHighMult, filtering::DoubleOmega, filtering::OmegaXi);
 
 using StrangenessFilter = StrangenessFilters::iterator;
 
@@ -249,7 +319,7 @@ static_assert(o2::framework::pack_size(FiltersPack) == NumberOfFilters);
 template <typename T, typename C>
 void addColumnToMap(std::unordered_map<std::string, std::unordered_map<std::string, float>>& map)
 {
-  map[MetadataTrait<T>::metadata::tableLabel()][C::columnLabel()] = 1.f;
+  map[o2::soa::getTableLabel<T>()][C::columnLabel()] = 1.f;
 }
 
 template <typename T, typename... C>
@@ -266,7 +336,7 @@ void addColumnsToMap(o2::framework::pack<C...>, std::unordered_map<std::string, 
 template <typename... T>
 void FillFiltersMap(o2::framework::pack<T...>, std::unordered_map<std::string, std::unordered_map<std::string, float>>& map)
 {
-  (addColumnsToMap<T>(typename T::table_t::columns{}, map), ...);
+  (addColumnsToMap<T>(typename T::table_t::persistent_columns_t{}, map), ...);
 }
 
 template <typename... C>

@@ -18,6 +18,11 @@ o2physics_add_dpl_workflow(r2p24id
                            PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                            COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(lambdacorr
+                           SOURCES lambdaR2Correlation.cxx
+                           PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                           COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(identifiedbf
                            SOURCES identifiedbf.cxx
                            PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::PWGCFCore
@@ -28,7 +33,31 @@ o2physics_add_dpl_workflow(identifiedbf-filter-qa
                            PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::PWGCFCore
                            COMPONENT_NAME Analysis)
 
-o2physics_add_dpl_workflow(twopartcorr-efficiency-qc
-                           SOURCES efficiencyAndQc.cxx
+o2physics_add_dpl_workflow(dpt-dpt-efficiency-and-qc
+                           SOURCES dptDptEfficiencyAndQc.cxx
                            PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::PWGCFCore
                            COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(dpt-dpt-per-run-qc
+                           SOURCES dptDptPerRunQc.cxx
+                           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::PWGCFCore O2Physics::AnalysisCCDB
+                           COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(dpt-dpt-per-run-extra-qc
+                           SOURCES dptDptPerRunExtraQc.cxx
+                           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::PWGCFCore O2Physics::AnalysisCCDB
+                           COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(corr-sparse
+                           SOURCES corrSparse.cxx
+                           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::PWGCFCore
+                           COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(neutron-proton-corr-zdc
+                           SOURCES neutronProtonCorrZdc.cxx
+                           PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                           COMPONENT_NAME Analysis)
+
+
+
+

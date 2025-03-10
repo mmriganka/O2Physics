@@ -8,7 +8,12 @@
 // In applying this license CERN does not waive the privileges and immunities
 // granted to it by virtue of its status as an Intergovernmental Organization
 // or submit itself to any jurisdiction.
-
+#include <map>
+#include <string>
+#include <unordered_set>
+#include <vector>
+#include <unordered_map>
+#include <memory>
 #include "Framework/runDataProcessing.h"
 #include "Framework/AnalysisTask.h"
 #include "Framework/AnalysisDataModel.h"
@@ -23,6 +28,8 @@ using namespace o2::framework;
 using namespace o2::framework::expressions;
 
 struct UpcVetoAnalysis {
+  bool fIsCreated = false;
+
   // amplitude axis
   int fNbAmp = 101;
   double fMinAmp = 0.;
@@ -105,17 +112,15 @@ struct UpcVetoAnalysis {
     fRun = bc.runNumber();
     o2::ccdb::CcdbApi ccdb_api;
     ccdb_api.init("http://alice-ccdb.cern.ch");
-    std::map<std::string, std::string> metadata;
-    std::map<std::string, std::string> headers = ccdb_api.retrieveHeaders(Form("RCT/Info/RunInformation/%i", fRun),
-                                                                          metadata, -1);
-
-    fTsSOR = std::atol(headers["SOR"].c_str());
-    fTsEOR = std::atol(headers["EOR"].c_str());
+    auto soreor = o2::ccdb::BasicCCDBManager::getRunDuration(ccdb_api, fRun);
+    fTsSOR = soreor.first;
+    fTsEOR = soreor.second;
     LOGP(info, "fTsSOR={}, fTsEOR={}", fTsSOR, fTsEOR);
 
-    auto grplhcif = ccdb_api.retrieveFromTFileAny<o2::parameters::GRPLHCIFData>("GLO/Config/GRPLHCIF", metadata,
-                                                                                fTsSOR);
+    std::map<std::string, std::string> metadata;
+    auto grplhcif = ccdb_api.retrieveFromTFileAny<o2::parameters::GRPLHCIFData>("GLO/Config/GRPLHCIF", metadata, fTsSOR);
     bcPatternB = grplhcif->getBunchFilling().getBCPattern();
+
     fNBcsB = 0;
     for (auto i = 0; i < o2::constants::lhc::LHCMaxBunches; ++i) {
       if (bcPatternB[i])
@@ -154,7 +159,8 @@ struct UpcVetoAnalysis {
     int nZdcs = zdcs.size();
 
     const o2::aod::BCs::iterator& fbc = bcs.begin();
-    if (fbc.runNumber() != fRun) {
+    if (fbc.runNumber() != fRun && !fIsCreated) {
+      fIsCreated = true;
       getBcInfo(fbc);
 
       for (auto i = 0; i < o2::constants::lhc::LHCMaxBunches; ++i) {
@@ -375,12 +381,12 @@ struct UpcVetoAnalysis {
         for (auto r = 0; r <= 10; ++r) {
           auto maxAmpV0A = -999.f;
           auto maxAmpT0A = -999.f;
-          auto s = gbc - r;
-          auto e = gbc + r;
+          int64_t s = gbc - r;
+          int64_t e = gbc + r;
           auto lower = std::lower_bound(gbcs.begin(), gbcs.end(), s);
           if (lower != gbcs.end()) {
             auto idx = std::distance(gbcs.begin(), lower);
-            while (gbcs[idx] >= s && gbcs[idx] <= e && idx < gbcs.size()) {
+            while (gbcs[idx] >= s && gbcs[idx] <= e && idx < std::ssize(gbcs)) {
               auto aV0A = vBcIdsWithV0A[idx];
               auto aT0A = vBcIdsWithT0A[idx];
               if (aV0A > maxAmpV0A)

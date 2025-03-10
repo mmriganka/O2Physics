@@ -16,7 +16,13 @@
 ///
 /// \author Giovanni Malfattore <giovanni.malfattore@cern.ch> and Rutuparna Rath <rutuparna.rath@cern.ch>
 ///
+
 #include "PWGLF/DataModel/LFNucleiTables.h"
+
+#include "EventFiltering/Zorro.h"
+#include "EventFiltering/ZorroSummary.h"
+#include "CCDB/BasicCCDBManager.h"
+#include <string>
 #include <TLorentzVector.h>
 #include <TF1.h>
 #include "ReconstructionDataFormats/Track.h"
@@ -28,6 +34,7 @@
 
 #include "Common/DataModel/Multiplicity.h"
 #include "Common/DataModel/PIDResponse.h"
+#include "Common/DataModel/PIDResponseITS.h"
 #include "Common/DataModel/EventSelection.h"
 #include "Common/DataModel/Centrality.h"
 #include "Common/DataModel/TrackSelectionTables.h"
@@ -41,6 +48,11 @@ using namespace o2::framework;
 using namespace o2::framework::expressions;
 
 struct LFNucleiBATask {
+  Service<o2::ccdb::BasicCCDBManager> ccdb;
+
+  Zorro zorro;
+  OutputObj<ZorroSummary> zorroSummary{"zorroSummary"};
+
   HistogramRegistry histos{"Histos", {}, OutputObjHandlingPolicy::AnalysisObject};
   HistogramRegistry spectraGen{"spectraGen", {}, OutputObjHandlingPolicy::AnalysisObject, false, true};
   HistogramRegistry debugHistos{"debugHistos", {}, OutputObjHandlingPolicy::AnalysisObject};
@@ -54,12 +66,21 @@ struct LFNucleiBATask {
   Configurable<bool> enableAl{"enableAl", true, "Flag to enable alpha analysis."};
 
   Configurable<bool> enableTrackingEff{"enableTrackingEff", 0, "Flag to enable tracking efficiency hitos."};
+  Configurable<std::string> ccdburl{"ccdb-url", "http://alice-ccdb.cern.ch", "url of the ccdb repository"};
+
+  // Set the triggered events skimming scheme
+  struct : ConfigurableGroup {
+    Configurable<bool> applySkimming{"applySkimming", false, "Skimmed dataset processing"};
+    Configurable<std::string> cfgSkimming{"cfgSkimming", "fHe", "Configurable for skimming"};
+  } skimmingOptions;
 
   // Set the event selection cuts
-  Configurable<bool> useSel8{"useSel8", true, "Use Sel8 for run3 Event Selection"};
-  Configurable<bool> TVXtrigger{"TVXtrigger", false, "Use TVX for Event Selection (default w/ Sel8)"};
-  Configurable<bool> removeTFBorder{"removeTFBorder", false, "Remove TimeFrame border (default w/ Sel8)"};
-  Configurable<bool> removeITSROFBorder{"removeITSROFBorder", false, "Remove ITS Read-Out Frame border (default w/ Sel8)"};
+  struct : ConfigurableGroup {
+    Configurable<bool> useSel8{"useSel8", true, "Use Sel8 for run3 Event Selection"};
+    Configurable<bool> TVXtrigger{"TVXtrigger", false, "Use TVX for Event Selection (default w/ Sel8)"};
+    Configurable<bool> removeTFBorder{"removeTFBorder", false, "Remove TimeFrame border (default w/ Sel8)"};
+    Configurable<bool> removeITSROFBorder{"removeITSROFBorder", false, "Remove ITS Read-Out Frame border (default w/ Sel8)"};
+  } evselOptions;
 
   // Set the multiplity event limits
   Configurable<float> cfgLowMultCut{"cfgLowMultCut", 0.0f, "Accepted multiplicity percentage lower limit"};
@@ -70,62 +91,92 @@ struct LFNucleiBATask {
   Configurable<float> cfgLowCutVertex{"cfgLowCutVertex", -10.0f, "Accepted z-vertex lower limit"};
 
   // Set the quality cuts for tracks
-  Configurable<bool> rejectFakeTracks{"rejectFakeTracks", false, "Flag to reject ITS-TPC fake tracks (for MC)"};
-  Configurable<float> cfgCutITSClusters{"cfgCutITSClusters", -1.f, "Minimum number of ITS clusters"};
-  Configurable<float> cfgCutTPCXRows{"cfgCutTPCXRows", -1.f, "Minimum number of crossed TPC rows"};
-  Configurable<float> cfgCutTPCClusters{"cfgCutTPCClusters", -1.f, "Minimum number of found TPC clusters"};
-  Configurable<int> nITSLayer{"nITSLayer", 0, "ITS Layer (0-6)"};
+  struct : ConfigurableGroup {
+    Configurable<bool> rejectFakeTracks{"rejectFakeTracks", false, "Flag to reject ITS-TPC fake tracks (for MC)"};
+    Configurable<float> cfgCutITSClusters{"cfgCutITSClusters", -1.f, "Minimum number of ITS clusters"};
+    Configurable<float> cfgCutTPCXRows{"cfgCutTPCXRows", -1.f, "Minimum number of crossed TPC rows"};
+    Configurable<float> cfgCutTPCClusters{"cfgCutTPCClusters", -1.f, "Minimum number of found TPC clusters"};
+    Configurable<float> cfgCutTPCCROFnd{"cfgCutTPCCROFnd", 0.8, "Minimum ratio of crossed TPC clusters over findable"};
+    Configurable<std::vector<float>> tpcChi2NclCuts{"tpcChi2NclCuts", {0.5, 4}, "Range of accepted of Chi2/TPC clusters"};
+    Configurable<std::vector<float>> itsChi2NclCuts{"itsChi2NclCuts", {0.f, 36}, "Range of accepted of Chi2/ITS clusters"};
+    Configurable<int> nITSLayer{"nITSLayer", 0, "ITS Layer (0-6)"};
+  } trkqcOptions;
 
   // Set the kinematic and PID cuts for tracks
-  Configurable<float> pCut{"pCut", 0.3f, "Value of the p selection for spectra (default 0.3)"};
-  Configurable<float> etaCut{"etaCut", 0.8f, "Value of the eta selection for spectra (default 0.8)"};
-  Configurable<float> yLowCut{"yLowCut", -1.0f, "Value of the low rapidity selection for spectra (default -1.0)"};
-  Configurable<float> yHighCut{"yHighCut", 1.0f, "Value of the high rapidity selection for spectra (default 1.0)"};
+  struct : ConfigurableGroup {
+    Configurable<float> pCut{"pCut", 0.3f, "Value of the p selection for spectra (default 0.3)"};
+    Configurable<float> etaCut{"etaCut", 0.8f, "Value of the eta selection for spectra (default 0.8)"};
+    Configurable<float> yLowCut{"yLowCut", -1.0f, "Value of the low rapidity selection for spectra (default -1.0)"};
+    Configurable<float> yHighCut{"yHighCut", 1.0f, "Value of the high rapidity selection for spectra (default 1.0)"};
+  } kinemOptions;
 
   Configurable<bool> isPVContributorCut{"isPVContributorCut", false, "Flag to enable isPVContributor cut."};
-  Configurable<float> DCAxyCustomCut{"DCAxyCustomCut", 2.0f, "Value of the DCAxy selection for spectra (default 2.0 cm)"};
-  Configurable<float> DCAzCustomCut{"DCAzCustomCut", 2.0f, "Value of the DCAz selection for spectra (default 2.0 cm)"};
 
-  Configurable<float> nsigmaTPCPr{"nsigmaTPCPr", 3.f, "Value of the Nsigma TPC cut for protons"};
-  Configurable<float> nsigmaTPCDe{"nsigmaTPCDe", 3.f, "Value of the Nsigma TPC cut for deuterons"};
-  Configurable<float> nsigmaTPCTr{"nsigmaTPCTr", 3.f, "Value of the Nsigma TPC cut for tritons"};
-  Configurable<float> nsigmaTPCHe{"nsigmaTPCHe", 3.f, "Value of the Nsigma TPC cut for helium-3"};
-  Configurable<float> nsigmaTPCAl{"nsigmaTPCAl", 3.f, "Value of the Nsigma TPC cut for alpha"};
+  struct : ConfigurableGroup {
+    Configurable<float> nsigmaTPCPr{"nsigmaTPCPr", 3.f, "Value of the Nsigma TPC cut for protons"};
+    Configurable<float> nsigmaTPCDe{"nsigmaTPCDe", 3.f, "Value of the Nsigma TPC cut for deuterons"};
+    Configurable<float> nsigmaTPCTr{"nsigmaTPCTr", 3.f, "Value of the Nsigma TPC cut for tritons"};
+    Configurable<float> nsigmaTPCHe{"nsigmaTPCHe", 3.f, "Value of the Nsigma TPC cut for helium-3"};
+    Configurable<float> nsigmaTPCAl{"nsigmaTPCAl", 3.f, "Value of the Nsigma TPC cut for alpha"};
+  } nsigmaTPCvar;
+
+  struct : ConfigurableGroup {
+    Configurable<bool> useITSHeCut{"useITSHeCut", false, "Select Helium if compatible with helium hypothesis (via SigmaITS)"};
+    Configurable<float> nsigmaITSHe{"nsigmaITSHe", -1.f, "Value of the Nsigma ITS cut for helium-3 ( > nSigmaITSHe)"};
+    Configurable<bool> showAverageClusterSize{"showAverageClusterSize", false, "Show average cluster size"};
+  } nsigmaITSvar;
 
   // Set additional cuts (used for debug)
   Configurable<float> betaCut{"betaCut", 0.4f, "Value of the beta selection for TOF cut (default 0.4)"};
 
   // Set the axis used in this task
   ConfigurableAxis binsPercentile{"binsPercentile", {100, 0, 100}, "Centrality FT0M"};
-  ConfigurableAxis binsPt{"binsPt", {VARIABLE_WIDTH, 0.0, 0.1, 0.12, 0.14, 0.16, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.4, 3.6, 3.8, 4.0, 4.2, 4.4, 4.6, 4.8, 5.0, 5.2, 5.4, 5.6, 5.8, 6.0, 6.5, 7.0, 7.5, 8.0}, ""};
+  ConfigurableAxis binsPt{"binsPt", {VARIABLE_WIDTH, 0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.425, 0.45, 0.475, 0.5, 0.5125, 0.525, 0.5375, 0.55, 0.5625, 0.575, 0.5875, 0.6, 0.6125, 0.625, 0.6375, 0.65, 0.6625, 0.675, 0.6875, 0.7, 0.7125, 0.725, 0.7375, 0.75, 0.7625, 0.775, 0.7875, 0.8, 0.8125, 0.825, 0.8375, 0.85, 0.8625, 0.875, 0.8875, 0.9, 0.9125, 0.925, 0.9375, 0.95, 0.9625, 0.975, 0.9875, 1.0, 1.0125, 1.025, 1.0375, 1.05, 1.0625, 1.075, 1.0875, 1.1, 1.1125, 1.125, 1.1375, 1.15, 1.1625, 1.175, 1.1875, 1.2, 1.2125, 1.225, 1.2375, 1.25, 1.2625, 1.275, 1.2875, 1.3, 1.3125, 1.325, 1.3375, 1.35, 1.3625, 1.375, 1.3875, 1.4, 1.4125, 1.425, 1.4375, 1.45, 1.4625, 1.475, 1.4875, 1.5, 1.5125, 1.525, 1.5375, 1.55, 1.5625, 1.575, 1.5875, 1.6, 1.6125, 1.625, 1.6375, 1.65, 1.6625, 1.675, 1.6875, 1.7, 1.7125, 1.725, 1.7375, 1.75, 1.7625, 1.775, 1.7875, 1.8, 1.8125, 1.825, 1.8375, 1.85, 1.8625, 1.875, 1.8875, 1.9, 1.9125, 1.925, 1.9375, 1.95, 1.9625, 1.975, 1.9875, 2.0, 2.0625, 2.125, 2.1875, 2.25, 2.3125, 2.375, 2.4375, 2.5, 2.625, 2.75, 2.875, 3.0, 3.25, 3.5, 3.75, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0}, ""};
   ConfigurableAxis binsPtHe{"binsPtHe", {VARIABLE_WIDTH, 1.0, 1.25, 1.50, 1.75, 2.0, 2.25, 2.50, 2.75, 3.0, 3.25, 3.50, 3.75, 4.0, 4.50, 5.0, 6.0, 7.0, 8.0}, ""};
   ConfigurableAxis binsPtZHe{"binsPtZHe", {VARIABLE_WIDTH, 0.5, 0.625, 0.75, 0.875, 1.0, 1.125, 1.25, 1.375, 1.5, 1.625, 1.75, 1.875, 2.0, 2.25, 2.5, 3.0, 3.5, 4.0}, ""};
 
-  ConfigurableAxis binsdEdx{"binsdEdx", {1000, 0.f, 1000.f}, ""};
+  ConfigurableAxis binsdEdx{"binsdEdx", {600, 0.f, 3000.f}, ""};
   ConfigurableAxis binsBeta{"binsBeta", {120, 0.0, 1.2}, ""};
   ConfigurableAxis binsDCA{"binsDCA", {400, -1.f, 1.f}, ""};
+  ConfigurableAxis binsSigmaITS{"binsSigmaITS", {200, -20, 20}, ""};
   ConfigurableAxis binsSigmaTPC{"binsSigmaTPC", {1000, -100, 100}, ""};
   ConfigurableAxis binsSigmaTOF{"binsSigmaTOF", {1000, -100, 100}, ""};
   ConfigurableAxis binsMassPr{"binsMassPr", {100, -1., 1.f}, ""};
   ConfigurableAxis binsMassDe{"binsMassDe", {180, -1.8, 1.8f}, ""};
   ConfigurableAxis binsMassTr{"binsMassTr", {250, -2.5, 2.5f}, ""};
   ConfigurableAxis binsMassHe{"binsMassHe", {300, -3., 3.f}, ""};
+  ConfigurableAxis avClsBins{"avClsBins", {200, 0, 20}, "Binning in average cluster size"};
 
   // Enable custom cuts/debug functions
-  Configurable<bool> enableFiltering{"enableFiltering", false, "Flag to enable filtering for p,d,t,He only -- disable if launch on skimmed dataset!"};
-  Configurable<bool> enableEvTimeSplitting{"enableEvTimeSplitting", false, "Flag to enable histograms splitting depending on the Event Time used"};
+  struct : ConfigurableGroup {
+    Configurable<bool> enableFiltering{"enableFiltering", false, "Flag to enable filtering for p,d,t,He only -- disable if launch on skimmed dataset!"};
+    Configurable<bool> enableIsGlobalTrack{"enableIsGlobalTrack", true, "Flag to enable IsGlobalTrackWoDCA"};
+    Configurable<bool> enableEvTimeSplitting{"enableEvTimeSplitting", false, "Flag to enable histograms splitting depending on the Event Time used"};
+  } filterOptions;
+
   Configurable<bool> enableDCACustomCut{"enableDCACustomCut", false, "Flag to enable DCA custom cuts - unflag to use standard isGlobalCut DCA cut"};
+  struct : ConfigurableGroup {
+    Configurable<int> DCACustomConfig{"DCACustomConfig", 0, "Select to use: pT independent DCAxy and DCAz CustomCut (0), pT dependent DCAxy and DCAz cut (1),  pt dependent DCAxy, DCAz CustomCut (2) DCAxy CustomCut, pT dependent DCAz (3) or a circular DCAxy,z cut  (4) for tracks. Need 'enableDCACustomCut' to be enabled."};
+    Configurable<float> DCAxyCustomCut{"DCAxyCustomCut", 0.05f, "Value of the DCAxy selection for spectra (default 0.05 cm)"};
+    Configurable<float> DCAzCustomCut{"DCAzCustomCut", 0.5f, "Value of the DCAz selection for spectra (default 0.5 cm)"};
+  } dcaConfOptions;
+
+  Configurable<std::vector<float>> parDCAxycuts{"parDCAxycuts", {0.004f, 0.013f, 1, 1}, "Parameters for Pt dependent DCAxy cut (if enabled): |DCAxy| < [3] * ([O] + [1]/Pt^[2])."};
+  Configurable<std::vector<float>> parDCAzcuts{"parDCAzcuts", {0.004f, 0.013f, 1, 1}, "Parameters for Pt dependent DCAz cut (if enabled): |DCAz| < [3] * ([O] + [1]/Pt^[2])."};
 
   // Enable output histograms
-  Configurable<bool> makeDCABeforeCutPlots{"makeDCABeforeCutPlots", false, "Flag to enable plots of DCA before cuts"};
-  Configurable<bool> makeDCAAfterCutPlots{"makeDCAAfterCutPlots", false, "Flag to enable plots of DCA after cuts"};
-  Configurable<bool> doTOFplots{"doTOFplots", true, "Flag to export plots of tracks with 1 hit on TOF."};
-  Configurable<bool> enableExpSignalTPC{"enableExpSignalTPC", true, "Flag to export dEdX - dEdX(exp) plots."};
-  Configurable<bool> enableExpSignalTOF{"enableExpSignalTOF", false, "Flag to export T - T(exp) plots."};
+  struct : ConfigurableGroup {
+    Configurable<bool> makeDCABeforeCutPlots{"makeDCABeforeCutPlots", false, "Flag to enable plots of DCA before cuts"};
+    Configurable<bool> makeDCAAfterCutPlots{"makeDCAAfterCutPlots", false, "Flag to enable plots of DCA after cuts"};
+    Configurable<bool> makeFakeTracksPlots{"makeFakeTracksPlots", false, "Flag to enable plots of misidentified particles"};
+    Configurable<bool> makeWrongEventPlots{"makeWrongEventPlots", false, "Flag to enable plots of particles from wrong event"};
+    Configurable<bool> doTOFplots{"doTOFplots", true, "Flag to export plots of tracks with 1 hit on TOF."};
+    Configurable<bool> enableExpSignalTPC{"enableExpSignalTPC", true, "Flag to export dEdX - dEdX(exp) plots."};
+    Configurable<bool> enableExpSignalTOF{"enableExpSignalTOF", false, "Flag to export T - T(exp) plots."};
+    Configurable<bool> enableBetaCut{"enableBetaCut", false, "Flag to enable TOF histograms with beta cut for debug"};
+  } outFlagOptions;
 
   Configurable<bool> enablePIDplot{"enablePIDplot", false, "Flag to enable PID histograms for debug"};
-  Configurable<bool> enableBetaCut{"enableBetaCut", false, "Flag to enable TOF histograms with beta cut for debug"};
-
   Configurable<bool> enableDebug{"enableDebug", false, "Flag to enable histograms for debug"};
   Configurable<bool> enablePtSpectra{"enablePtSpectra", false, "Flag to enable histograms for efficiency debug."};
 
@@ -139,26 +190,18 @@ struct LFNucleiBATask {
   // Additional function used for pT-shift calibration
   TF1* fShiftPtHe = 0;
   TF1* fShiftPtantiHe = 0;
-  TF1* fShiftPHe = 0;
-  TF1* fShiftPantiHe = 0;
-  // TF1* fShiftTPCmomHe = 0;
-  // TF1* fShiftTPCmomantiHe = 0;
-
   TF1* fShiftAntiD = 0;
   TF1* fShiftD = 0;
-  // Configurable<bool> enableTPCmomShift{"enableTPCmomShift", false, "Flag to enable TPC momentum shift (for He only)"};
-  // Configurable<bool> enablePShift{"enablePShift", false, "Flag to enable P shift (for He only)"};
-  Configurable<bool> enablePtShift{"enablePtShift", false, "Flag to enable Pt shift (for He only)"};
+
   Configurable<bool> enablePtShiftAntiD{"enablePtShiftAntiD", true, "Flag to enable Pt shift (for antiDeuteron only)"};
   Configurable<bool> enablePtShiftD{"enablePtShiftD", true, "Flag to enable Pt shift (for Deuteron only)"};
-
-  Configurable<std::vector<float>> parShiftPtHe{"parShiftPtHe", {0.0f, 0.1f, 0.1f, 0.1f, 0.1f}, "Parameters for helium3-Pt shift (if enabled)."};
-  Configurable<std::vector<float>> parShiftPtantiHe{"parShiftPtantiHe", {0.0f, 0.1f, 0.1f, 0.1f, 0.1f}, "Parameters for anti-helium3-Pt shift (if enabled)."};
-  Configurable<std::vector<float>> parShiftPHe{"parShiftPHe", {0.0f, 0.1f, 0.1f, 0.1f, 0.1f}, "Parameters for helium3-P shift (if enabled)."};
-  Configurable<std::vector<float>> parShiftPantiHe{"parShiftPantiHe", {0.0f, 0.1f, 0.1f, 0.1f, 0.1f}, "Parameters for anti-helium3-P shift (if enabled)."};
-
   Configurable<std::vector<float>> parShiftPtAntiD{"parShiftPtAntiD", {-0.0955412, 0.798164, -0.536111, 0.0887876, -1.11022e-13}, "Parameters for Pt shift (if enabled)."};
   Configurable<std::vector<float>> parShiftPtD{"parShiftPtD", {-0.0955412, 0.798164, -0.536111, 0.0887876, -1.11022e-13}, "Parameters for Pt shift (if enabled)."};
+
+  Configurable<bool> enablePtShift{"enablePtShift", false, "Flag to enable Pt shift (for He only)"};
+  Configurable<std::vector<float>> parShiftPtHe{"parShiftPtHe", {0.0f, 0.1f, 0.1f, 0.1f, 0.1f}, "Parameters for helium3-Pt shift (if enabled)."};
+  Configurable<std::vector<float>> parShiftPtantiHe{"parShiftPtantiHe", {0.0f, 0.1f, 0.1f, 0.1f, 0.1f}, "Parameters for anti-helium3-Pt shift (if enabled)."};
+
   Configurable<bool> enableCentrality{"enableCentrality", true, "Flag to enable centrality 3D histos)"};
 
   // PDG codes and masses used in this analysis
@@ -169,17 +212,44 @@ struct LFNucleiBATask {
   static constexpr int PDGTriton = 1000010030;
   static constexpr int PDGHelium = 1000020030;
   static constexpr int PDGAlpha = 1000020040;
-  static constexpr float fMassProton = 0.938272088f;
-  static constexpr float fMassDeuteron = 1.87561f;
-  static constexpr float fMassTriton = 2.80892f;
-  static constexpr float fMassHelium = 2.80839f;
-  static constexpr float fMassAlpha = 3.72738f;
+  static constexpr float MassProtonVal = 0.938272088f;
+  static constexpr float MassDeuteronVal = 1.87561f;
+  static constexpr float MassTritonVal = 2.80892f;
+  static constexpr float MassHeliumVal = 2.80839f;
+  static constexpr float MassAlphaVal = 3.72738f;
+
+  template <typename TrackType>
+  float averageClusterSizeTrk(const TrackType& track)
+  {
+    return o2::aod::ITSResponse::averageClusterSize(track.itsClusterSizes());
+  }
+
+  float averageClusterSizePerCoslInv(uint32_t itsClusterSizes, float eta) { return o2::aod::ITSResponse::averageClusterSize(itsClusterSizes) * std::cosh(eta); }
+
+  template <typename TrackType>
+  float averageClusterSizePerCoslInv(const TrackType& track)
+  {
+    return averageClusterSizePerCoslInv(track.itsClusterSizes(), track.eta());
+  }
+
+  void initCCDB(o2::aod::BCsWithTimestamps::iterator const& bc)
+  {
+    if (skimmingOptions.applySkimming) {
+      zorro.initCCDB(ccdb.service, bc.runNumber(), bc.timestamp(), skimmingOptions.cfgSkimming.value);
+      zorro.populateHistRegistry(histos, bc.runNumber());
+    }
+  }
 
   void init(o2::framework::InitContext&)
   {
+    if (skimmingOptions.applySkimming) {
+      zorroSummary.setObject(zorro.getZorroSummary());
+    }
+
     const AxisSpec pAxis{binsPt, "#it{p} (GeV/#it{c})"};
     const AxisSpec ptAxis{binsPt, "#it{p}_{T} (GeV/#it{c})"};
     const AxisSpec ptHeAxis{binsPtHe, "#it{p}_{T} (GeV/#it{c})"};
+    const AxisSpec pZAxis{binsPt, "#it{p}/z (GeV/#it{c})"};
     const AxisSpec ptZHeAxis{binsPtZHe, "#it{p}_{T}/z (GeV/#it{c})"};
     const AxisSpec dedxAxis{binsdEdx, "d#it{E}/d#it{x} A.U."};
     const AxisSpec betaAxis{binsBeta, "TOF #beta"};
@@ -189,29 +259,37 @@ struct LFNucleiBATask {
     const AxisSpec massDeAxis{binsMassDe, ""};
     const AxisSpec massTrAxis{binsMassTr, ""};
     const AxisSpec massHeAxis{binsMassHe, ""};
-    const AxisSpec SigmaTPCAxis{binsSigmaTPC, ""};
-    const AxisSpec SigmaTOFAxis{binsSigmaTOF, ""};
+    const AxisSpec sigmaITSAxis{binsSigmaITS, ""};
+    const AxisSpec sigmaTPCAxis{binsSigmaTPC, ""};
+    const AxisSpec sigmaTOFAxis{binsSigmaTOF, ""};
+    const AxisSpec avClsAxis{avClsBins, "<ITS Cls. Size>"};
+    const AxisSpec avClsEffAxis{avClsBins, "<ITS Cls. Size> / cosh(#eta)"};
 
     if (doprocessData == true && doprocessMCReco == true) {
       LOG(fatal) << "Can't enable processData and processMCReco in the same time, pick one!";
     }
-    spectraGen.add<TH1>("LfEv/pT_nocut", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/pT_TVXtrigger", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/pT_TFrameBorder", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/pT_ITSROFBorder", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/pT_sel8", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
+    spectraGen.add<TH1>("LfEv/pT_nocut", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/pT_TVXtrigger", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/pT_TFrameBorder", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/pT_ITSROFBorder", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/pT_sel8", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/pT_MCsel8", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
 
-    spectraGen.add<TH1>("LfEv/helium/pT_nocut_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_TVXtrigger_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_TFrameBorder_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_ITSROFBorder_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_sel8_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
+    spectraGen.add<TH1>("LfEv/helium/pT_nocut_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_TVXtrigger_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_TFrameBorder_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_ITSROFBorder_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_sel8_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_MCsel8_He", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_MCsel8_HePrim", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
 
-    spectraGen.add<TH1>("LfEv/helium/pT_nocut_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_TVXtrigger_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_TFrameBorder_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_ITSROFBorder_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
-    spectraGen.add<TH1>("LfEv/helium/pT_sel8_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{600, 0., 6.}});
+    spectraGen.add<TH1>("LfEv/helium/pT_nocut_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_TVXtrigger_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_TFrameBorder_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_ITSROFBorder_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_sel8_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_MCsel8_antiHe", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
+    spectraGen.add<TH1>("LfEv/helium/pT_MCsel8_antiHePrim", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{ptHeAxis}});
 
     if (enableDebug) {
       debugHistos.add<TH1>("qa/h1VtxZ_nocut", "V_{z};V_{z} (in cm); counts", HistType::kTH1F, {{1500, -15, 15}});
@@ -227,9 +305,17 @@ struct LFNucleiBATask {
       }
     }
 
+    histos.add<TH1>("event/eventSkimming", "eventSkimming", HistType::kTH1D, {{2, 0.0, 2.0}});
+    auto hSkim = histos.get<TH1>(HIST("event/eventSkimming"));
+    hSkim->GetXaxis()->SetBinLabel(1, "Total");
+    hSkim->GetXaxis()->SetBinLabel(2, "Skimmed events");
+
     histos.add<TH1>("event/eventSelection", "eventSelection", HistType::kTH1D, {{7, -0.5, 6.5}});
     auto h = histos.get<TH1>(HIST("event/eventSelection"));
-    h->GetXaxis()->SetBinLabel(1, "Total");
+    if (skimmingOptions.applySkimming)
+      h->GetXaxis()->SetBinLabel(1, "Skimmed events");
+    else
+      h->GetXaxis()->SetBinLabel(1, "Total");
     h->GetXaxis()->SetBinLabel(2, "TVX trigger cut");
     h->GetXaxis()->SetBinLabel(3, "TF border cut");
     h->GetXaxis()->SetBinLabel(4, "ITS ROF cut");
@@ -238,8 +324,10 @@ struct LFNucleiBATask {
     h->GetXaxis()->SetBinLabel(7, "Z-vert Cut");
     histos.add<TH1>("event/h1VtxZ", "V_{z};V_{z} (in cm); counts", HistType::kTH1F, {{1500, -15, 15}});
 
-    histos.add<TH1>("tracks/h1pT", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{500, 0., 10.}});
-    histos.add<TH1>("tracks/h1p", "Track momentum; p (GeV/#it{c}); counts", HistType::kTH1F, {{500, 0., 10.}});
+    if (enablePIDplot) {
+      histos.add<TH1>("tracks/h1pT", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{500, 0., 10.}});
+      histos.add<TH1>("tracks/h1p", "Track momentum; p (GeV/#it{c}); counts", HistType::kTH1F, {{500, 0., 10.}});
+    }
 
     histos.add<TH1>("qa/h1ITSncr", "number of crossed rows in ITS; ITSncr; counts", HistType::kTH1F, {{12, 0, 12}});
     histos.add<TH1>("qa/h1TPCncr", "number of crossed rows in TPC; TPCncr; counts", HistType::kTH1F, {{150, 60, 170}});
@@ -249,48 +337,48 @@ struct LFNucleiBATask {
     histos.add<TH1>("qa/h1chi2TPC", "#chi^{2}_{TPC}/n_{TPC}; #chi^{2}_{TPC}/n_{TPC}; counts", HistType::kTH1F, {{11, -0.5, 10.5}});
 
     if (enablePtSpectra) {
-      histos.add<TH2>("tracks/eff/h2pVsTPCmomentum", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-      if (doTOFplots)
-        histos.add<TH2>("tracks/eff/h2TPCmomentumVsTOFExpMomentum", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
+      histos.add<TH2>("tracks/eff/h2pVsTPCmomentum", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+      if (outFlagOptions.doTOFplots)
+        histos.add<TH2>("tracks/eff/h2TPCmomentumVsTOFExpMomentum", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
 
       if (enablePr) {
-        histos.add<TH2>("tracks/eff/proton/h2pVsTPCmomentumPr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        histos.add<TH2>("tracks/eff/proton/h2pVsTPCmomentumantiPr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        if (doTOFplots) {
-          histos.add<TH2>("tracks/eff/proton/h2pVsTOFExpMomentumPr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/proton/h2pVsTOFExpMomentumantiPr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/proton/h2TPCmomentumVsTOFExpMomentumPr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/proton/h2TPCmomentumVsTOFExpMomentumantiPr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/proton/h2pVsTPCmomentumPr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/proton/h2pVsTPCmomentumantiPr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        if (outFlagOptions.doTOFplots) {
+          histos.add<TH2>("tracks/eff/proton/h2pVsTOFExpMomentumPr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/proton/h2pVsTOFExpMomentumantiPr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/proton/h2TPCmomentumVsTOFExpMomentumPr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/proton/h2TPCmomentumVsTOFExpMomentumantiPr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
         }
       }
       if (enableDe) {
-        histos.add<TH2>("tracks/eff/deuteron/h2pVsTPCmomentumDe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        histos.add<TH2>("tracks/eff/deuteron/h2pVsTPCmomentumantiDe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        if (doTOFplots) {
-          histos.add<TH2>("tracks/eff/deuteron/h2pVsTOFExpMomentumDe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/deuteron/h2pVsTOFExpMomentumantiDe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumDe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumantiDe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/deuteron/h2pVsTPCmomentumDe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/deuteron/h2pVsTPCmomentumantiDe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        if (outFlagOptions.doTOFplots) {
+          histos.add<TH2>("tracks/eff/deuteron/h2pVsTOFExpMomentumDe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/deuteron/h2pVsTOFExpMomentumantiDe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumDe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumantiDe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
         }
       }
       if (enableTr) {
-        histos.add<TH2>("tracks/eff/triton/h2pVsTPCmomentumTr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        histos.add<TH2>("tracks/eff/triton/h2pVsTPCmomentumantiTr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        if (doTOFplots) {
-          histos.add<TH2>("tracks/eff/triton/h2pVsTOFExpMomentumTr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/triton/h2pVsTOFExpMomentumantiTr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/triton/h2TPCmomentumVsTOFExpMomentumTr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/triton/h2TPCmomentumVsTOFExpMomentumantiTr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/triton/h2pVsTPCmomentumTr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/triton/h2pVsTPCmomentumantiTr", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        if (outFlagOptions.doTOFplots) {
+          histos.add<TH2>("tracks/eff/triton/h2pVsTOFExpMomentumTr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/triton/h2pVsTOFExpMomentumantiTr", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/triton/h2TPCmomentumVsTOFExpMomentumTr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/triton/h2TPCmomentumVsTOFExpMomentumantiTr", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
         }
       }
       if (enableHe) {
-        histos.add<TH2>("tracks/eff/helium/h2pVsTPCmomentumHe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        histos.add<TH2>("tracks/eff/helium/h2pVsTPCmomentumantiHe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-        if (doTOFplots) {
-          histos.add<TH2>("tracks/eff/helium/h2pVsTOFExpMomentumHe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/helium/h2pVsTOFExpMomentumantiHe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumHe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
-          histos.add<TH2>("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumantiHe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{800, 0.f, 8.f}, {800, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/helium/h2pVsTPCmomentumHe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        histos.add<TH2>("tracks/eff/helium/h2pVsTPCmomentumantiHe", "#it{p}_{TPC} vs #it{p}; #it{p}_{TPC}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+        if (outFlagOptions.doTOFplots) {
+          histos.add<TH2>("tracks/eff/helium/h2pVsTOFExpMomentumHe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/helium/h2pVsTOFExpMomentumantiHe", "#it{p}_{TOF} vs #it{p}; #it{p}_{TOF}; #it{p}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumHe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
+          histos.add<TH2>("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumantiHe", "#it{p}_{TOF} vs #it{p}_{TPC}; #it{p}_{TOF}; #it{p}_{TPC}", HistType::kTH2F, {{200, 0.f, 8.f}, {200, 0.f, 8.f}});
         }
       }
     }
@@ -298,9 +386,10 @@ struct LFNucleiBATask {
     if (enableDebug) {
       debugHistos.add<TH1>("debug/event/h1CentV0M", "V0M; Multiplicity; counts", HistType::kTH1F, {{27000, 0, 27000}});
       // trackQA
-      debugHistos.add<TH1>("debug/tracks/h1Eta", "pseudoRapidity; #eta; counts", HistType::kTH1F, {{200, -1.0, 1.0}});
+      debugHistos.add<TH1>("debug/tracks/h1Eta", "pseudoRapidity; #eta; counts", HistType::kTH1F, {{200, -2.0, 2.0}});
       debugHistos.add<TH1>("debug/tracks/h1VarPhi", "#phi; #phi; counts", HistType::kTH1F, {{63, 0.0, 6.3}});
-      debugHistos.add<TH2>("debug/tracks/h2EtaVsPhi", "#eta vs #phi; #eta; #phi", HistType::kTH2F, {{200, -1.0, 1.0}, {63, 0.0, 6.3}});
+      debugHistos.add<TH2>("debug/tracks/h2EtaVsPhi", "#eta vs #phi; #eta; #phi", HistType::kTH2F, {{200, -2.0, 2.0}, {63, 0.0, 6.3}});
+      debugHistos.add<TH2>("debug/tracks/h2PionYvsPt", "#it{y} vs #it{p}_{T} (#pi)", HistType::kTH2F, {{200, -2.0, 2.0}, {ptAxis}});
     }
 
     if (enablePtSpectra) {
@@ -310,7 +399,7 @@ struct LFNucleiBATask {
         debugHistos.add<TH1>("tracks/eff/hPtPrebinned", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{50, 0., 5.}});
         debugHistos.add<TH1>("tracks/eff/hPtantiPrebinned", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{50, 0., 5.}});
 
-        if (doTOFplots) {
+        if (outFlagOptions.doTOFplots) {
           debugHistos.add<TH1>("tracks/eff/hPtPTOF", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
           debugHistos.add<TH1>("tracks/eff/hPtantiPTOF", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
           debugHistos.add<TH1>("tracks/eff/hPtPTOFrebinned", "Track #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{50, 0., 5.}});
@@ -341,28 +430,33 @@ struct LFNucleiBATask {
         histos.add<TH1>("tracks/eff/triton/hPtantiTrTOF", "Track #it{p}_{T} (#bar{t}); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
       }
       if (enableHe) {
-        histos.add<TH1>("tracks/eff/helium/hPtHe", "Track #it{p}_{T}/z (He); #it{p}_{T}/z (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
-        histos.add<TH1>("tracks/eff/helium/hPtantiHe", "Track #it{p}_{T}/z (#bar{He}); #it{p}_{T}/z (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
-        histos.add<TH1>("tracks/eff/helium/hPtHeTOF", "Track #it{p}_{T}/z (He); #it{p}_{T}/z (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
-        histos.add<TH1>("tracks/eff/helium/hPtantiHeTOF", "Track #it{p}_{T}/z (#bar{He}); #it{p}_{T}/z (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
+        histos.add<TH1>("tracks/eff/helium/hPtHe", "Track #it{p}_{T} (He); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
+        histos.add<TH1>("tracks/eff/helium/hPtantiHe", "Track #it{p}_{T} (#bar{He}); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
+        histos.add<TH1>("tracks/eff/helium/hPtHeTOF", "Track #it{p}_{T} (He); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
+        histos.add<TH1>("tracks/eff/helium/hPtantiHeTOF", "Track #it{p}_{T} (#bar{He}); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
       }
     }
     // tracks
     // DCAxy,z
-    if (makeDCABeforeCutPlots) {
+    if (outFlagOptions.makeDCABeforeCutPlots) {
+      histos.add<TH3>("tracks/dca/before/hDCAxyVsDCAzVsPt", "DCAxy vs DCAz vs Pt/z; DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
+      histos.add<TH2>("tracks/dca/before/hDCAxyVsDCAz", "DCAxy vs DCAz (before cuts)", HistType::kTH2F, {{550, -1.1, 1.1}, {550, -1.1, 1.1}});
       histos.add<TH1>("tracks/dca/before/hDCAxy", "DCAxy", HistType::kTH1F, {dcaxyAxis});
       histos.add<TH1>("tracks/dca/before/hDCAz", "DCAz", HistType::kTH1F, {dcazAxis});
-      // histos.add<TH2>("tracks/dca/before/hDCAxyVsDCAz", "DCAxy vs DCAz", HistType::kTH2F, {{dcaxyAxis}, {dcazAxis}});
-      histos.add<TH2>("tracks/dca/before/hDCAxyVsPt", "DCAxy vs Pt", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-      histos.add<TH2>("tracks/dca/before/hDCAzVsPt", "DCAz vs Pt", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+      histos.add<TH2>("tracks/dca/before/hDCAxyVsPt", "DCAxy vs Pt", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+      histos.add<TH2>("tracks/dca/before/hDCAzVsPt", "DCAz vs Pt", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
       if (enablePr) {
+        // histos.add<TH3>("tracks/proton/dca/before/hDCAxyVsDCAzVsPtProton", "DCAxy vs DCAz vs Pt/z (p)", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
+        // histos.add<TH3>("tracks/proton/dca/before/hDCAxyVsDCAzVsPtantiProton", "DCAxy vs DCAz vs Pt/z (#bar{p})", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
         histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtProton", "DCAxy vs Pt (p)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtantiProton", "DCAxy vs Pt (#bar{p})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtProton", "DCAz vs Pt (p)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
         histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtantiProton", "DCAz vs Pt (#bar{p})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
       }
       if (enableDe) {
+        // histos.add<TH3>("tracks/deuteron/dca/before/hDCAxyVsDCAzVsPtDeuteron", "DCAxy vs DCAz vs Pt/z (d)", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
+        // histos.add<TH3>("tracks/deuteron/dca/before/hDCAxyVsDCAzVsPtantiDeuteron", "DCAxy vs DCAz vs Pt/z (#bar{d})", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
         if (enableCentrality) {
           histos.add<TH3>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronVsMult", "DCAxy vs Pt (d)", HistType::kTH3F, {{ptAxis}, {dcaxyAxis}, {binsPercentile}});
           histos.add<TH3>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronVsMult", "DCAxy vs Pt (#bar{d})", HistType::kTH3F, {{ptAxis}, {dcaxyAxis}, {binsPercentile}});
@@ -372,27 +466,45 @@ struct LFNucleiBATask {
         }
         histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteron", "DCAz vs Pt (d)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
         histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteron", "DCAz vs Pt (#bar{d})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+        histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronNoTOF", "DCAxy vs Pt (d)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronNoTOF", "DCAxy vs Pt (#bar{d})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteronNoTOF", "DCAz vs Pt (d)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+        histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronNoTOF", "DCAz vs Pt (#bar{d})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
       }
       if (enableTr) {
+        // histos.add<TH3>("tracks/triton/dca/before/hDCAxyVsDCAzVsPtTriton", "DCAxy vs DCAz vs Pt/z (t)", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
+        // histos.add<TH3>("tracks/triton/dca/before/hDCAxyVsDCAzVsPtantiTriton", "DCAxy vs DCAz vs Pt/z (#bar{t})", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtHe}});
         histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTriton", "DCAxy vs Pt (t)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtantiTriton", "DCAxy vs Pt (#bar{t})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtTriton", "DCAz vs Pt (t)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
         histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtantiTriton", "DCAz vs Pt (#bar{t})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
       }
       if (enableHe) {
-        histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-        histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-        histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-        histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+        histos.add<TH3>("tracks/helium/dca/before/hDCAxyVsDCAzVsPtHelium", "DCAxy vs DCAz vs Pt/z (He); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+        histos.add<TH3>("tracks/helium/dca/before/hDCAxyVsDCAzVsPtantiHelium", "DCAxy vs DCAz vs Pt/z (#bar{He}); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-        if (doTOFplots) {
-          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumNoTOF", "DCAxy vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumNoTOF", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumNoTOF", "DCAz vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+        histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumNoTOF", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+        if (outFlagOptions.doTOFplots) {
+          histos.add<TH3>("tracks/helium/dca/before/TOF/hDCAxyVsDCAzVsPtHelium", "DCAxy vs DCAz vs Pt/z (He) (w/TOF); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+          histos.add<TH3>("tracks/helium/dca/before/TOF/hDCAxyVsDCAzVsPtantiHelium", "DCAxy vs DCAz vs Pt/z (#bar{He}) (w/TOF); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
         }
       }
       if (enableAl) {
+        // histos.add<TH3>("tracks/alpha/dca/before/hDCAxyVsDCAzVsPtAlpha", "DCAxy vs DCAz vs Pt/z (#alpha)", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+        // histos.add<TH3>("tracks/alpha/dca/before/hDCAxyVsDCAzVsPtantiAlpha", "DCAxy vs DCAz vs Pt/z (#bar{#alpha})", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
         histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtAlpha", "DCAxy vs Pt (#alpha)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtantiAlpha", "DCAxy vs Pt (#bar{#alpha})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtAlpha", "DCAz vs Pt (#alpha)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
@@ -400,45 +512,48 @@ struct LFNucleiBATask {
       }
     }
 
-    if (makeDCAAfterCutPlots) {
+    if (outFlagOptions.makeDCAAfterCutPlots) {
       histos.add<TH1>("tracks/dca/after/hDCAxy", "DCAxy; DCAxy; counts", HistType::kTH1F, {{dcaxyAxis}});
       histos.add<TH1>("tracks/dca/after/hDCAz", "DCAz; DCAz; counts", HistType::kTH1F, {{dcazAxis}});
-      // histos.add<TH2>("tracks/dca/after/hDCAxyVsDCAz", "DCAxy vs DCAz; DCAxy (cm); DCAz (cm)", HistType::kTH2F, {{dcaxyAxis}, {dcazAxis}});
-      histos.add<TH2>("tracks/dca/after/hDCAxyVsPt", "DCAxy vs Pt", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-      histos.add<TH2>("tracks/dca/after/hDCAzVsPt", "DCAz vs Pt", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+      histos.add<TH2>("tracks/dca/after/hDCAxyVsPt", "DCAxy vs Pt", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+      histos.add<TH2>("tracks/dca/after/hDCAzVsPt", "DCAz vs Pt", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
     }
-    if (enablePr && makeDCAAfterCutPlots) {
+    if (enablePr && outFlagOptions.makeDCAAfterCutPlots) {
       histos.add<TH2>("tracks/proton/dca/after/hDCAxyVsPtProton", "DCAxy vs Pt (p)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/proton/dca/after/hDCAxyVsPtantiProton", "DCAxy vs Pt (#bar{p})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/proton/dca/after/hDCAzVsPtProton", "DCAz vs Pt (p)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
       histos.add<TH2>("tracks/proton/dca/after/hDCAzVsPtantiProton", "DCAz vs Pt (#bar{p})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
     }
-    if (enableDe && makeDCAAfterCutPlots) {
+    if (enableDe && outFlagOptions.makeDCAAfterCutPlots) {
       histos.add<TH2>("tracks/deuteron/dca/after/hDCAxyVsPtDeuteron", "DCAxy vs Pt (d)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteron", "DCAxy vs Pt (#bar{d})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/deuteron/dca/after/hDCAzVsPtDeuteron", "DCAz vs Pt (d)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
       histos.add<TH2>("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteron", "DCAz vs Pt (#bar{d})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
     }
-    if (enableTr && makeDCAAfterCutPlots) {
+    if (enableTr && outFlagOptions.makeDCAAfterCutPlots) {
       histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtTriton", "DCAxy vs Pt (t)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtantiTriton", "DCAxy vs Pt (#bar{t})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/triton/dca/after/hDCAzVsPtTriton", "DCAz vs Pt (t)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
       histos.add<TH2>("tracks/triton/dca/after/hDCAzVsPtantiTriton", "DCAz vs Pt (#bar{t})", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
     }
-    if (enableHe && makeDCAAfterCutPlots) {
-      histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-      histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-      histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-      histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+    if (enableHe && outFlagOptions.makeDCAAfterCutPlots) {
+      histos.add<TH3>("tracks/helium/dca/after/hDCAxyVsDCAzVsPtHelium", "DCAxy vs DCAz vs Pt/z (He); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+      histos.add<TH3>("tracks/helium/dca/after/hDCAxyVsDCAzVsPtantiHelium", "DCAxy vs DCAz vs Pt/z (#bar{He}); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+      histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+      histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+      histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+      histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-      if (doTOFplots) {
-        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+      if (outFlagOptions.doTOFplots) {
+        histos.add<TH3>("tracks/helium/dca/after/TOF/hDCAxyVsDCAzVsPtHelium", "DCAxy vs DCAz vs Pt/z (He); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+        histos.add<TH3>("tracks/helium/dca/after/TOF/hDCAxyVsDCAzVsPtantiHelium", "DCAxy vs DCAz vs Pt/z (#bar{He}); DCAxy; DCAz", HistType::kTH3F, {{140, -0.7f, 0.7f}, {160, -0.8f, 0.8f}, {binsPtZHe}});
+        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHelium", "DCAxy vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHelium", "DCAxy vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHelium", "DCAz vs Pt (He)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+        histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHelium", "DCAz vs Pt (#bar{He})", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
       }
     }
-    if (enableAl && makeDCAAfterCutPlots) {
+    if (enableAl && outFlagOptions.makeDCAAfterCutPlots) {
       histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtAlpha", "DCAxy vs Pt (#alpha)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtantiAlpha", "DCAxy vs Pt (#bar{#alpha})", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
       histos.add<TH2>("tracks/alpha/dca/after/hDCAzVsPtAlpha", "DCAz vs Pt (#alpha)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
@@ -706,14 +821,14 @@ struct LFNucleiBATask {
         histos.add<TH1>("tracks/helium/h1antiHeliumSpectraTrueSec_Z2", "#it{p}_{T} (He)", HistType::kTH1F, {ptHeAxis});
         histos.add<TH1>("tracks/helium/h1antiHeliumSpectraTrueTransport_Z2", "#it{p}_{T} (He)", HistType::kTH1F, {ptHeAxis});
 
-        if (doTOFplots) {
+        if (outFlagOptions.doTOFplots) {
           histos.add<TH1>("tracks/helium/TOF/h1HeliumSpectraTruePrim_Z2", "#it{p}_{T} (He)", HistType::kTH1F, {ptHeAxis});
           histos.add<TH1>("tracks/helium/TOF/h1antiHeliumSpectraTruePrim_Z2", "#it{p}_{T} (He)", HistType::kTH1F, {ptHeAxis});
         }
         if (enablePtSpectra) {
           histos.add<TH1>("tracks/eff/helium/hPtHeTrue", "Track #it{p}_{T} (He); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
           histos.add<TH1>("tracks/eff/helium/hPtantiHeTrue", "Track #it{p}_{T} (#bar{He}); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
-          if (doTOFplots) {
+          if (outFlagOptions.doTOFplots) {
             histos.add<TH1>("tracks/eff/helium/hPtHeTOFTrue", "Track #it{p}_{T} (He); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
             histos.add<TH1>("tracks/eff/helium/hPtantiHeTOFTrue", "Track #it{p}_{T} (#bar{He}); #it{p}_{T} (GeV/#it{c}); counts", HistType::kTH1F, {{400, 0., 8.}});
           }
@@ -732,21 +847,53 @@ struct LFNucleiBATask {
       }
       // 2D-DCAxy
       if (enablePr) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtProtonTrue", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtProtonTruePrim", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtProtonTrueSec", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtProtonTrueMaterial", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtProtonTrueTransport", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrue", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtantiProtonTruePrim", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrueSec", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrueMaterial", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrueTransport", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+          if (outFlagOptions.doTOFplots) {
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrue", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTruePrim", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrueSec", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrueMaterial", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrueTransport", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrue", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTruePrim", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrueSec", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrueMaterial", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrueTransport", "DCAxy vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrue", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTruePrim", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrueSec", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrueMaterial", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrueTransport", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrue", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTruePrim", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrueSec", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrueMaterial", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrueTransport", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          }
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/proton/dca/after/hDCAxyVsPtProtonTrue", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/proton/dca/after/hDCAxyVsPtProtonTruePrim", "DCAxy vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
@@ -761,21 +908,94 @@ struct LFNucleiBATask {
         }
       }
       if (enableDe) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrue", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTruePrim", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrueSec", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrueMaterial", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrueTransport", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrue", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTruePrim", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrueSec", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrueMaterial", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrueTransport", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+          // Fake & wrong histos
+          if (outFlagOptions.makeFakeTracksPlots) {
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrue", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTruePrim", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrueSec", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrueTransport", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrue", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTruePrim", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrueSec", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrueTransport", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          }
+
+          if (outFlagOptions.doTOFplots) {
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrue", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTruePrim", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrueSec", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrueMaterial", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrueTransport", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrue", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTruePrim", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrueSec", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrueMaterial", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrueTransport", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrue", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTruePrim", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrueSec", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrueMaterial", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrueTransport", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrue", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTruePrim", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrueSec", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrueMaterial", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrueTransport", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            if (outFlagOptions.makeFakeTracksPlots) {
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrue", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTruePrim", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrueSec", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrueTransport", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrue", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTruePrim", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrueSec", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrueTransport", "DCAxy vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTrue", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTruePrim", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTrueSec", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTrueTransport", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTrue", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTruePrim", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTrueSec", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTrueTransport", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            }
+          }
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTrue", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTruePrim", "DCAxy vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
@@ -792,21 +1012,53 @@ struct LFNucleiBATask {
         }
       }
       if (enableTr) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTrue", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTruePrim", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTrueSec", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTrueMaterial", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTrueTransport", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrue", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtantiTritonTruePrim", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrueSec", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrueTransport", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTrueMaterial", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/triton/dca/before/hDCAxyVsPtTritonTrueTransport", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+          if (outFlagOptions.doTOFplots) {
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrue", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTruePrim", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrueSec", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrueMaterial", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrueTransport", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrue", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTruePrim", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrueSec", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrueMaterial", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrueTransport", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtTritonTrue", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtTritonTruePrim", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtTritonTrueSec", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtTritonTrueMaterial", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtTritonTrueTransport", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtantiTritonTrue", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtantiTritonTruePrim", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtantiTritonTrueSec", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtantiTritonTrueMaterial", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/before/TOF/hDCAzVsPtantiTritonTrueTransport", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          }
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtTritonTrue", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtTritonTruePrim", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
@@ -818,159 +1070,305 @@ struct LFNucleiBATask {
           histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtantiTritonTruePrim", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtantiTritonTrueSec", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/triton/dca/after/hDCAxyVsPtantiTritonTrueTransport", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+          if (outFlagOptions.doTOFplots) {
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtTritonTrue", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtTritonTruePrim", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtTritonTrueSec", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtTritonTrueTransport", "DCAxy vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtantiTritonTrue", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtantiTritonTruePrim", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtantiTritonTrueSec", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAxyVsPtantiTritonTrueTransport", "DCAxy vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtTritonTrue", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtTritonTruePrim", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtTritonTrueSec", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtTritonTrueTransport", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtantiTritonTrue", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtantiTritonTruePrim", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtantiTritonTrueSec", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/triton/dca/after/TOF/hDCAzVsPtantiTritonTrueTransport", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          }
         }
       }
       if (enableHe) {
         // all tracks
-        if (makeDCABeforeCutPlots) {
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+        if (outFlagOptions.makeDCABeforeCutPlots) {
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueMaterial", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueMaterial", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrueMaterial", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueMaterial", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          if (doTOFplots) {
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          if (outFlagOptions.doTOFplots) {
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueMaterial", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueMaterial", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueMaterial", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueMaterial", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          }
+
+          // Fake & wrong histos
+          if (outFlagOptions.makeFakeTracksPlots) {
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          }
+
+          if (outFlagOptions.makeWrongEventPlots) {
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          }
+          if (outFlagOptions.doTOFplots) {
+            if (outFlagOptions.makeFakeTracksPlots) {
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            }
+
+            if (outFlagOptions.makeWrongEventPlots) {
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+              histos.add<TH2>("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            }
           }
         }
 
-        if (makeDCAAfterCutPlots) {
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+        if (outFlagOptions.makeDCAAfterCutPlots) {
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-          if (doTOFplots) {
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+          if (outFlagOptions.doTOFplots) {
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrue", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTruePrim", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrueSec", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrueTransport", "DCAxy vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrue", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTruePrim", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrueSec", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrueTransport", "DCAxy vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcaxyAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrue", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTruePrim", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrueSec", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrueTransport", "DCAz vs Pt (He); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrue", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
 
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
-            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{900, 0.5f, 5.f}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTruePrim", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrueSec", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrueTransport", "DCAz vs Pt (#bar{He}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptZHeAxis}, {dcazAxis}});
           }
         }
       }
       if (enableAl) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrue", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtAlphaTruePrim", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrueSec", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrueMaterial", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrueTransport", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrue", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTruePrim", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrueSec", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrueMaterial", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrueTransport", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrue", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtAlphaTruePrim", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrueSec", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrueMaterial", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrueTransport", "DCAxy vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrue", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTruePrim", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrueSec", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
+          histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrueMaterial", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
           histos.add<TH2>("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrueTransport", "DCAxy vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAxy (cm)", HistType::kTH2F, {{ptAxis}, {dcaxyAxis}});
         }
       }
       // 2D-DCAz
       if (enablePr) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtProtonTrue", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtProtonTruePrim", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtProtonTrueSec", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtProtonTrueMaterial", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtProtonTrueTransport", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtantiProtonTrue", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtantiProtonTruePrim", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueSec", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueMaterial", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueTransport", "DCAz vs Pt (#bar{p}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
         }
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/proton/dca/after/hDCAzVsPtProtonTrue", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/proton/dca/after/hDCAzVsPtProtonTruePrim", "DCAz vs Pt (p); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
@@ -985,21 +1383,37 @@ struct LFNucleiBATask {
         }
       }
       if (enableDe) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrue", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTruePrim", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueSec", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueMaterial", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueTransport", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrue", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTruePrim", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueSec", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueMaterial", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueTransport", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+          if (outFlagOptions.makeFakeTracksPlots) {
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTrue", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTruePrim", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTrueSec", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTrueTransport", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTrue", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTruePrim", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTrueSec", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+            histos.add<TH2>("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTrueTransport", "DCAz vs Pt (#bar{d}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          }
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTrue", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTruePrim", "DCAz vs Pt (d); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
@@ -1016,21 +1430,23 @@ struct LFNucleiBATask {
         }
       }
       if (enableTr) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtTritonTrue", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtTritonTruePrim", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtTritonTrueSec", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtTritonTrueMaterial", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtTritonTrueTransport", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtantiTritonTrue", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtantiTritonTruePrim", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueSec", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueMaterial", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueTransport", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/triton/dca/after/hDCAzVsPtTritonTrue", "DCAz vs Pt (#bar{t}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/triton/dca/after/hDCAzVsPtTritonTruePrim", "DCAz vs Pt (t); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
@@ -1046,21 +1462,23 @@ struct LFNucleiBATask {
       }
 
       if (enableAl) {
-        if (makeDCABeforeCutPlots) {
+        if (outFlagOptions.makeDCABeforeCutPlots) {
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtAlphaTrue", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtAlphaTruePrim", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueSec", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueMaterial", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueTransport", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrue", "DCAz vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTruePrim", "DCAz vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueSec", "DCAz vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
+          histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueMaterial", "DCAz vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
           histos.add<TH2>("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueTransport", "DCAz vs Pt (#bar{#alpha}); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
         }
 
-        if (makeDCAAfterCutPlots) {
+        if (outFlagOptions.makeDCAAfterCutPlots) {
           histos.add<TH2>("tracks/alpha/dca/after/hDCAzVsPtAlphaTrue", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
 
           histos.add<TH2>("tracks/alpha/dca/after/hDCAzVsPtAlphaTruePrim", "DCAz vs Pt (#alpha); #it{p}_{T} (GeV/#it{c}); DCAz (cm)", HistType::kTH2F, {{ptAxis}, {dcazAxis}});
@@ -1077,42 +1495,53 @@ struct LFNucleiBATask {
     }
 
     //  Bethe-Bloch TPC distribution and Beta vs pT TOF distribution
-    histos.add<TH2>("tracks/h2TPCsignVsTPCmomentum", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{500, -5.f, 5.f}, {dedxAxis}});
+    if (nsigmaITSvar.showAverageClusterSize && enablePIDplot) {
+      histos.add<TH2>("tracks/averageClusterSize", "", HistType::kTH2F, {{pZAxis}, {avClsAxis}});
+      histos.add<TH2>("tracks/averageClusterSizePerCoslInv", "", HistType::kTH2F, {{pZAxis}, {avClsEffAxis}});
+    }
     if (enableDebug) {
-      debugHistos.add<TH2>("debug/h2TPCsignVsTPCmomentum_AllTracks", "TPC <-dE/dX> vs #it{p}/Z (w/o rejection); Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{500, -5.f, 5.f}, {dedxAxis}});
-      debugHistos.add<TH2>("debug/h2TPCsignVsTPCmomentum_FakeHits", "TPC <-dE/dX> vs #it{p}/Z (Fake hits); Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{500, -5.f, 5.f}, {dedxAxis}});
+      debugHistos.add<TH2>("debug/h2TPCsignVsTPCmomentum_AllTracks", "TPC <-dE/dX> vs #it{p}/Z (w/o rejection); Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, -8.f, 8.f}, {dedxAxis}});
+      debugHistos.add<TH2>("debug/h2TPCsignVsTPCmomentum_FakeHits", "TPC <-dE/dX> vs #it{p}/Z (Fake hits); Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, -8.f, 8.f}, {dedxAxis}});
     }
     if (enablePIDplot) {
+      histos.add<TH2>("tracks/h2TPCsignVsTPCmomentum", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, -8.f, 8.f}, {dedxAxis}});
       if (enablePr) {
-        histos.add<TH2>("tracks/proton/h2TPCsignVsTPCmomentumProton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
-        histos.add<TH2>("tracks/proton/h2TPCsignVsTPCmomentumantiProton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/proton/h2TPCsignVsTPCmomentumProton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/proton/h2TPCsignVsTPCmomentumantiProton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
       }
       if (enableDe) {
-        histos.add<TH2>("tracks/deuteron/h2TPCsignVsTPCmomentumDeuteron", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
-        histos.add<TH2>("tracks/deuteron/h2TPCsignVsTPCmomentumantiDeuteron", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/deuteron/h2TPCsignVsTPCmomentumDeuteron", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/deuteron/h2TPCsignVsTPCmomentumantiDeuteron", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
       }
       if (enableTr) {
-        histos.add<TH2>("tracks/triton/h2TPCsignVsTPCmomentumTriton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
-        histos.add<TH2>("tracks/triton/h2TPCsignVsTPCmomentumantiTriton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/triton/h2TPCsignVsTPCmomentumTriton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/triton/h2TPCsignVsTPCmomentumantiTriton", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
       }
       if (enableHe) {
-        histos.add<TH2>("tracks/helium/h2TPCsignVsTPCmomentumHelium", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
-        histos.add<TH2>("tracks/helium/h2TPCsignVsTPCmomentumantiHelium", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/helium/h2TPCsignVsTPCmomentumHelium", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/helium/h2TPCsignVsTPCmomentumantiHelium", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
       }
       if (enableAl) {
-        histos.add<TH2>("tracks/alpha/h2TPCsignVsTPCmomentumAlpha", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
-        histos.add<TH2>("tracks/alpha/h2TPCsignVsTPCmomentumantiAlpha", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, 0.f, 5.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/alpha/h2TPCsignVsTPCmomentumAlpha", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
+        histos.add<TH2>("tracks/alpha/h2TPCsignVsTPCmomentumantiAlpha", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{400, 0.f, 8.f}, {dedxAxis}});
       }
     }
 
-    if (doTOFplots) {
-      histos.add<TH2>("tracks/h2TPCsignVsBetaGamma", "TPC <-dE/dX> vs #beta#gamma/Z; Signed #beta#gamma; TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{600, -6.f, 6.f}, {dedxAxis}});
-      histos.add<TH2>("tracks/h2TOFbetaVsP", "TOF #beta vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta", HistType::kTH2F, {{500, -5.f, 5.f}, {betaAxis}});
-      if (enableBetaCut)
-        histos.add<TH2>("tracks/h2TOFbetaVsP_BetaCut", "TOF #beta vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta", HistType::kTH2F, {{500, -5.f, 5.f}, {betaAxis}});
+    if (enableHe) {
+      if (nsigmaITSvar.showAverageClusterSize) {
+        histos.add<TH2>("tracks/helium/averageClusterSize", "", HistType::kTH2F, {{pZAxis}, {avClsAxis}});
+        histos.add<TH2>("tracks/helium/averageClusterSizePerCoslInv", "", HistType::kTH2F, {{pZAxis}, {avClsEffAxis}});
+      }
     }
 
-    if (enableExpSignalTPC) {
+    if (outFlagOptions.doTOFplots && enablePIDplot) {
+      histos.add<TH2>("tracks/h2TPCsignVsBetaGamma", "TPC <-dE/dX> vs #beta#gamma/Z; Signed #beta#gamma; TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{250, -5.f, 5.f}, {dedxAxis}});
+      histos.add<TH2>("tracks/h2TOFbetaVsP", "TOF #beta vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta", HistType::kTH2F, {{250, -5.f, 5.f}, {betaAxis}});
+      if (outFlagOptions.enableBetaCut)
+        histos.add<TH2>("tracks/h2TOFbetaVsP_BetaCut", "TOF #beta vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta", HistType::kTH2F, {{250, -5.f, 5.f}, {betaAxis}});
+    }
+
+    if (outFlagOptions.enableExpSignalTPC) {
       //  TPCExpSignal histograms
       if (enablePr) {
         histos.add<TH2>("tracks/proton/h2ProtonTPCExpSignalDiffVsPt", "TPC <-dE/dX> - Exp <-dE/dX> (p) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); TPC <-dE/dX> ExpDiff (p)", HistType::kTH2F, {{ptAxis}, {16000, -800, 800.}});
@@ -1130,40 +1559,55 @@ struct LFNucleiBATask {
 
     //  NSigmasTPC histograms
     if (enableDebug) {
-      debugHistos.add<TH2>("debug/tracks/pion/h2PionVspTNSigmaTPC", "NSigmaTPC(pi) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-      debugHistos.add<TH2>("debug/tracks/kaon/h2KaonVspTNSigmaTPC", "NSigmaTPC(Ka) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+      debugHistos.add<TH2>("debug/tracks/pion/h2PionVspTNSigmaTPC", "NSigmaTPC(pi) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+      debugHistos.add<TH2>("debug/tracks/kaon/h2KaonVspTNSigmaTPC", "NSigmaTPC(Ka) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
     }
 
     if (enablePr) {
-      histos.add<TH2>("tracks/proton/h2ProtonVspTNSigmaTPC", "NSigmaTPC(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-      histos.add<TH2>("tracks/proton/h2antiProtonVspTNSigmaTPC", "NSigmaTPC(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+      histos.add<TH2>("tracks/proton/h2ProtonVspTNSigmaTPC", "NSigmaTPC(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+      histos.add<TH2>("tracks/proton/h2antiProtonVspTNSigmaTPC", "NSigmaTPC(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
     }
     if (enableDe) {
       if (enableCentrality) {
-        histos.add<TH3>("tracks/deuteron/h3DeuteronVspTNSigmaTPCVsMult", "NSigmaTPC(d) vs pT; #it{p}_{T} (GeV/#it{c}) vs mult; NSigmaTPC", HistType::kTH3F, {{ptAxis}, {SigmaTPCAxis}, {binsPercentile}});
-        histos.add<TH3>("tracks/deuteron/h3antiDeuteronVspTNSigmaTPCVsMult", "NSigmaTPC(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}) vs mult; NSigmaTPC", HistType::kTH3F, {{ptAxis}, {SigmaTPCAxis}, {binsPercentile}});
+        histos.add<TH3>("tracks/deuteron/h3DeuteronVspTNSigmaTPCVsMult", "NSigmaTPC(d) vs pT; #it{p}_{T} (GeV/#it{c}) vs mult; NSigmaTPC", HistType::kTH3F, {{ptAxis}, {sigmaTPCAxis}, {binsPercentile}});
+        histos.add<TH3>("tracks/deuteron/h3antiDeuteronVspTNSigmaTPCVsMult", "NSigmaTPC(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}) vs mult; NSigmaTPC", HistType::kTH3F, {{ptAxis}, {sigmaTPCAxis}, {binsPercentile}});
       } else {
-        histos.add<TH2>("tracks/deuteron/h2DeuteronVspTNSigmaTPC", "NSigmaTPC(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-        histos.add<TH2>("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC", "NSigmaTPC(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-        histos.add<TH2>("tracks/deuteron/h2DeuteronVspTNSigmaTPCTruePrim", "NSigmaTPC(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-        histos.add<TH2>("tracks/deuteron/h2antiDeuteronVspTNSigmaTPCTruePrim", "NSigmaTPC(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+        histos.add<TH2>("tracks/deuteron/h2DeuteronVspTNSigmaTPC", "NSigmaTPC(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+        histos.add<TH2>("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC", "NSigmaTPC(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+        histos.add<TH2>("tracks/deuteron/h2DeuteronVspTNSigmaTPCTruePrim", "NSigmaTPC(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+        histos.add<TH2>("tracks/deuteron/h2antiDeuteronVspTNSigmaTPCTruePrim", "NSigmaTPC(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
       }
     }
     if (enableTr) {
-      histos.add<TH2>("tracks/triton/h2TritonVspTNSigmaTPC", "NSigmaTPC(t) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-      histos.add<TH2>("tracks/triton/h2antiTritonVspTNSigmaTPC", "NSigmaTPC(#bar{t}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+      // histos.add<TH2>("tracks/triton/h2TritonVspTNSigmaITS", "NSigmaITS(t) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaITS", HistType::kTH2F, {{ptAxis}, {sigmaITSAxis}});
+      // histos.add<TH2>("tracks/triton/h2antiTritonVspTNSigmaITS", "NSigmaITS(#bar{t}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaITS", HistType::kTH2F, {{ptAxis}, {sigmaITSAxis}});
+
+      histos.add<TH2>("tracks/triton/h2TritonVspTNSigmaTPC", "NSigmaTPC(t) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+      histos.add<TH2>("tracks/triton/h2antiTritonVspTNSigmaTPC", "NSigmaTPC(#bar{t}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
     }
     if (enableHe) {
-      histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaTPC", "NSigmaTPC(He) vs pT/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptZHeAxis}, {SigmaTPCAxis}});
-      histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaTPC", "NSigmaTPC(#bar{He}) vs pT/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptZHeAxis}, {SigmaTPCAxis}});
+      histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaITSHe", "NSigmaITS(He) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(He)", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+      histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaITSHe", "NSigmaITS(#bar{He}) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(#bar{He})", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+
+      histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaITSTr", "NSigmaITS(t) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(t)", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+      histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaITSTr", "NSigmaITS(#bar{t}) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(#bar{t})", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+
+      histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaITSHe_wTPCpid", "NSigmaITS(He) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(He)", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+      histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaITSHe_wTPCpid", "NSigmaITS(#bar{He}) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(#bar{He})", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+
+      histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaITSTr_wTPCpid", "NSigmaITS(t) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(t)", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+      histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaITSTr_wTPCpid", "NSigmaITS(#bar{t}) vs p/z; #it{p}/z (GeV/#it{c}); NSigmaITS(#bar{t})", HistType::kTH2F, {{pZAxis}, {sigmaITSAxis}});
+
+      histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaTPC", "NSigmaTPC(He) vs pT/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptZHeAxis}, {sigmaTPCAxis}});
+      histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaTPC", "NSigmaTPC(#bar{He}) vs pT/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptZHeAxis}, {sigmaTPCAxis}});
     }
     if (enableAl) {
-      histos.add<TH2>("tracks/alpha/h2AlphaVspTNSigmaTPC", "NSigmaTPC(#alpha) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-      histos.add<TH2>("tracks/alpha/h2antiAlphaVspTNSigmaTPC", "NSigmaTPC(#bar{#alpha}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+      histos.add<TH2>("tracks/alpha/h2AlphaVspTNSigmaTPC", "NSigmaTPC(#alpha) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+      histos.add<TH2>("tracks/alpha/h2antiAlphaVspTNSigmaTPC", "NSigmaTPC(#bar{#alpha}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
     }
 
     // TOF plots
-    if (doTOFplots) {
+    if (outFlagOptions.doTOFplots) {
       // TOF beta histograms
       if (enablePr) {
         histos.add<TH2>("tracks/proton/h2ProtonTOFbetaVsP", "TOF #beta (p) vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta (p)", HistType::kTH2F, {{250, 0.f, 5.f}, {betaAxis}});
@@ -1181,7 +1625,7 @@ struct LFNucleiBATask {
         histos.add<TH2>("tracks/helium/h2HeliumTOFbetaVsP", "TOF #beta (He) vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta (He)", HistType::kTH2F, {{250, 0.f, 5.f}, {betaAxis}});
         histos.add<TH2>("tracks/helium/h2antiHeliumTOFbetaVsP", "TOF #beta (#bar{He}) vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta (#bar{He})", HistType::kTH2F, {{250, 0.f, 5.f}, {betaAxis}});
       }
-      if (enableExpSignalTOF) {
+      if (outFlagOptions.enableExpSignalTOF) {
         //  TOFExpSignal histograms
         if (enablePr) {
           histos.add<TH2>("tracks/proton/h2ProtonTOFExpSignalDiffVsPt", "TOF t - t_{exp}(p) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); TOF t - t_{exp} (p)", HistType::kTH2F, {{ptAxis}, {2000, -25000, 25000}});
@@ -1204,70 +1648,62 @@ struct LFNucleiBATask {
       }
 
       // NSigmaTOF histograms
-      histos.add<TH2>("tracks/pion/h2PionVspTNSigmaTOF", "NSigmaTOF(pi) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-      histos.add<TH2>("tracks/kaon/h2KaonVspTNSigmaTOF", "NSigmaTOF(Ka) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+      if (enableDebug) {
+        histos.add<TH2>("tracks/pion/h2PionVspTNSigmaTOF", "NSigmaTOF(pi) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+        histos.add<TH2>("tracks/kaon/h2KaonVspTNSigmaTOF", "NSigmaTOF(Ka) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+      }
       if (enablePr) {
-        histos.add<TH2>("tracks/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-        histos.add<TH2>("tracks/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+        histos.add<TH2>("tracks/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+        histos.add<TH2>("tracks/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
       }
       if (enableDe) {
-        histos.add<TH2>("tracks/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-        histos.add<TH2>("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+        histos.add<TH2>("tracks/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+        histos.add<TH2>("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
       }
       if (enableHe) {
-        histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaTOF", "NSigmaTOF(He) vs #it{p}_{T}/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptZHeAxis}, {SigmaTOFAxis}});
-        histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaTOF", "NSigmaTOF(#bar{He}) vs #it{p}_{T}/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptZHeAxis}, {SigmaTOFAxis}});
-      }
-      if (enableDebug) {
-        // NSigmaTPC vs NSigmaTOF histograms
-        if (enablePr) {
-          debugHistos.add<TH3>("debug/tracks/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt", "NSigmaTPC (p) vs NSigmaTOF(p); NSigmaTPC; NSigmaTOF; #it{p}_{T} (GeV/#it{c})", HistType::kTH3F, {{100, -20, 20}, {100, -20, 20}, {ptAxis}});
-          debugHistos.add<TH3>("debug/tracks/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt", "NSigmaTPC (#bar{p}) vs NSigmaTOF(#bar{p}); NSigmaTPC; NSigmaTOF; #it{p}_{T} (GeV/#it{c})", HistType::kTH3F, {{100, -20, 20}, {100, -20, 20}, {ptAxis}});
-        }
-        if (enableDe) {
-          debugHistos.add<TH3>("debug/tracks/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt", "NSigmaTPC(d) vs NSigmaTOF(d); NSigmaTPC; NSigmaTOF; #it{p}_{T} (GeV/#it{c})", HistType::kTH3F, {{100, -20, 20}, {100, -20, 20}, {ptAxis}});
-          debugHistos.add<TH3>("debug/tracks/deuteron/h3antiDeuteronNSigmaTPCvsNSigmaTOFvsPt", "NSigmaTPC (#bar{d}) vs NSigmaTOF(#bar{d}); NSigmaTPC; NSigmaTOF; #it{p}_{T} (GeV/#it{c})", HistType::kTH3F, {{100, -20, 20}, {100, -20, 20}, {ptAxis}});
-        }
+        histos.add<TH2>("tracks/helium/h2HeliumVspTNSigmaTOF", "NSigmaTOF(He) vs #it{p}_{T}/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptZHeAxis}, {sigmaTOFAxis}});
+        histos.add<TH2>("tracks/helium/h2antiHeliumVspTNSigmaTOF", "NSigmaTOF(#bar{He}) vs #it{p}_{T}/z; #it{p}_{T}/z (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptZHeAxis}, {sigmaTOFAxis}});
       }
       // TOF mass histograms
-      histos.add<TH2>("tracks/h2TOFmassVsPt", "h2TOFmassVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
+      if (enablePIDplot)
+        histos.add<TH2>("tracks/h2TOFmassVsPt", "h2TOFmassVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
       if (enablePr) {
-        histos.add<TH2>("tracks/proton/h2TOFmassProtonVsPt", "h2TOFmassProtonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-        histos.add<TH2>("tracks/proton/h2TOFmassantiProtonVsPt", "h2TOFmassantiProtonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-        if (enableBetaCut) {
-          histos.add<TH2>("tracks/proton/h2TOFmassProtonVsPt_BetaCut", "h2TOFmassProtonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-          histos.add<TH2>("tracks/proton/h2TOFmassantiProtonVsPt_BetaCut", "h2TOFmassantiProtonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
+        histos.add<TH2>("tracks/proton/h2TOFmassProtonVsPt", "h2TOFmassProtonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+        histos.add<TH2>("tracks/proton/h2TOFmassantiProtonVsPt", "h2TOFmassantiProtonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+        if (outFlagOptions.enableBetaCut) {
+          histos.add<TH2>("tracks/proton/h2TOFmassProtonVsPt_BetaCut", "h2TOFmassProtonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+          histos.add<TH2>("tracks/proton/h2TOFmassantiProtonVsPt_BetaCut", "h2TOFmassantiProtonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
         }
       }
       if (enableDe) {
-        histos.add<TH2>("tracks/deuteron/h2TOFmassDeuteronVsPt", "h2TOFmassDeuteronVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-        histos.add<TH2>("tracks/deuteron/h2TOFmassantiDeuteronVsPt", "h2TOFmassantiDeuteronVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-        if (enableBetaCut) {
-          histos.add<TH2>("tracks/deuteron/h2TOFmassDeuteronVsPt_BetaCut", "h2TOFmassDeuteronVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-          histos.add<TH2>("tracks/deuteron/h2TOFmassantiDeuteronVsPt_BetaCut", "h2TOFmassantiDeuteronVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
+        histos.add<TH2>("tracks/deuteron/h2TOFmassDeuteronVsPt", "h2TOFmassDeuteronVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+        histos.add<TH2>("tracks/deuteron/h2TOFmassantiDeuteronVsPt", "h2TOFmassantiDeuteronVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+        if (outFlagOptions.enableBetaCut) {
+          histos.add<TH2>("tracks/deuteron/h2TOFmassDeuteronVsPt_BetaCut", "h2TOFmassDeuteronVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+          histos.add<TH2>("tracks/deuteron/h2TOFmassantiDeuteronVsPt_BetaCut", "h2TOFmassantiDeuteronVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
         }
       }
       if (enableTr) {
-        histos.add<TH2>("tracks/triton/h2TOFmassTritonVsPt", "h2TOFmassTritonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-        histos.add<TH2>("tracks/triton/h2TOFmassantiTritonVsPt", "h2TOFmassantiTritonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-        if (enableBetaCut) {
-          histos.add<TH2>("tracks/triton/h2TOFmassTritonVsPt_BetaCut", "h2TOFmassTritonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
-          histos.add<TH2>("tracks/triton/h2TOFmassantiTritonVsPt_BetaCut", "h2TOFmassantiTritonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {250, 0., 5.}});
+        histos.add<TH2>("tracks/triton/h2TOFmassTritonVsPt", "h2TOFmassTritonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+        histos.add<TH2>("tracks/triton/h2TOFmassantiTritonVsPt", "h2TOFmassantiTritonVsPt; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+        if (outFlagOptions.enableBetaCut) {
+          histos.add<TH2>("tracks/triton/h2TOFmassTritonVsPt_BetaCut", "h2TOFmassTritonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
+          histos.add<TH2>("tracks/triton/h2TOFmassantiTritonVsPt_BetaCut", "h2TOFmassantiTritonVsPt_BetaCut; TOFmass; #it{p}_{T} (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {250, 0., 5.}});
         }
       }
       if (enableHe) {
-        histos.add<TH2>("tracks/helium/h2TOFmassHeliumVsPt", "h2TOFmassHeliumVsPt; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {ptZHeAxis}});
-        histos.add<TH2>("tracks/helium/h2TOFmassantiHeliumVsPt", "h2TOFmassantiHeliumVsPt; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {ptZHeAxis}});
-        if (enableBetaCut) {
-          histos.add<TH2>("tracks/helium/h2TOFmassHeliumVsPt_BetaCut", "h2TOFmassHeliumVsPt_BetaCut; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {ptZHeAxis}});
-          histos.add<TH2>("tracks/helium/h2TOFmassantiHeliumVsPt_BetaCut", "h2TOFmassantiHeliumVsPt_BetaCut; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{320, 0.4, 4.}, {ptZHeAxis}});
+        histos.add<TH2>("tracks/helium/h2TOFmassHeliumVsPt", "h2TOFmassHeliumVsPt; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {ptZHeAxis}});
+        histos.add<TH2>("tracks/helium/h2TOFmassantiHeliumVsPt", "h2TOFmassantiHeliumVsPt; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {ptZHeAxis}});
+        if (outFlagOptions.enableBetaCut) {
+          histos.add<TH2>("tracks/helium/h2TOFmassHeliumVsPt_BetaCut", "h2TOFmassHeliumVsPt_BetaCut; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {ptZHeAxis}});
+          histos.add<TH2>("tracks/helium/h2TOFmassantiHeliumVsPt_BetaCut", "h2TOFmassantiHeliumVsPt_BetaCut; TOFmass; #it{p}_{T}/z (GeV)", HistType::kTH2F, {{180, 0.4, 4.}, {ptZHeAxis}});
         }
       }
       // TOF mass squared histograms
       if (enablePr) {
         histos.add<TH2>("tracks/proton/h2TOFmass2ProtonVsPt", "#Delta M^{2} (p) vs #it{p}_{T}; #Delta M^{2} (p); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massPrAxis}, {250, 0., 5.}});
         histos.add<TH2>("tracks/proton/h2TOFmass2antiProtonVsPt", "#Delta M^{2} (#bar{p}) vs #it{p}_{T}; #Delta M^{2} (#bar{p}); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massPrAxis}, {250, 0., 5.}});
-        if (enableBetaCut) {
+        if (outFlagOptions.enableBetaCut) {
           histos.add<TH2>("tracks/proton/h2TOFmass2ProtonVsPt_BetaCut", "#Delta M^{2} (p) vs #it{p}_{T}; #Delta M^{2} (p); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massPrAxis}, {250, 0., 5.}});
           histos.add<TH2>("tracks/proton/h2TOFmass2antiProtonVsPt_BetaCut", "#Delta M^{2} (#bar{p}) vs #it{p}_{T}; #Delta M^{2} (#bar{p}); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massPrAxis}, {250, 0., 5.}});
         }
@@ -1280,7 +1716,7 @@ struct LFNucleiBATask {
           histos.add<TH2>("tracks/deuteron/h2TOFmass2DeuteronVsPt", "#Delta M^{2} (d) vs #it{p}_{T}; #Delta M^{2} (d); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massDeAxis}, {250, 0., 5.}});
           histos.add<TH2>("tracks/deuteron/h2TOFmass2antiDeuteronVsPt", "#Delta M^{2} (#bar{d}) vs #it{p}_{T}; #Delta M^{2} (#bar{d}); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massDeAxis}, {250, 0., 5.}});
         }
-        if (enableBetaCut) {
+        if (outFlagOptions.enableBetaCut) {
           histos.add<TH2>("tracks/deuteron/h2TOFmass2DeuteronVsPt_BetaCut", "#Delta M^{2} (d) vs #it{p}_{T}; #Delta M^{2} (d); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massDeAxis}, {250, 0., 5.}});
           histos.add<TH2>("tracks/deuteron/h2TOFmass2antiDeuteronVsPt_BetaCut", "#Delta M^{2} (#bar{d}) vs #it{p}_{T}; #Delta M^{2} (#bar{d}); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massDeAxis}, {250, 0., 5.}});
         }
@@ -1288,7 +1724,7 @@ struct LFNucleiBATask {
       if (enableTr) {
         histos.add<TH2>("tracks/triton/h2TOFmass2TritonVsPt", "#Delta M^{2} (t) vs #it{p}_{T}; #Delta M^{2} (t); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massTrAxis}, {250, 0., 5.}});
         histos.add<TH2>("tracks/triton/h2TOFmass2antiTritonVsPt", "#Delta M^{2} (#bar{t}) vs #it{p}_{T}; #Delta M^{2} (#bar{t}; #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massTrAxis}, {250, 0., 5.}});
-        if (enableBetaCut) {
+        if (outFlagOptions.enableBetaCut) {
           histos.add<TH2>("tracks/triton/h2TOFmass2TritonVsPt_BetaCut", "#Delta M^{2} (t) vs #it{p}_{T}; #Delta M^{2} (t); #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massTrAxis}, {250, 0., 5.}});
           histos.add<TH2>("tracks/triton/h2TOFmass2antiTritonVsPt_BetaCut", "#Delta M^{2} (#bar{t}) vs #it{p}_{T}; #Delta M^{2} (#bar{t}; #it{p}_{T} (GeV/#it{c})", HistType::kTH2F, {{massTrAxis}, {250, 0., 5.}});
         }
@@ -1298,13 +1734,13 @@ struct LFNucleiBATask {
         histos.add<TH2>("tracks/helium/h2TOFmass2HeliumVsPt", "#Delta M^{2} (He) vs #it{p}_{T}/z; #Delta M^{2} (He); #it{p}_{T}/z (GeV/#it{c})", HistType::kTH2F, {{massHeAxis}, {ptZHeAxis}});
         histos.add<TH2>("tracks/helium/h2TOFmassDeltaHeliumVsPt", "#Delta M (He) vs #it{p}_{T}/z; #Delta M (He); #it{p}_{T}/z (GeV/#it{c})", HistType::kTH2F, {{massHeAxis}, {ptZHeAxis}});
         histos.add<TH2>("tracks/helium/h2TOFmassDeltaantiHeliumVsPt", "#Delta M (#bar{He}) vs #it{p}_{T}/z; #Delta M (#bar{He}); #it{p}_{T}/z (GeV/#it{c})", HistType::kTH2F, {{massHeAxis}, {ptZHeAxis}});
-        if (enableBetaCut) {
+        if (outFlagOptions.enableBetaCut) {
           histos.add<TH2>("tracks/helium/h2TOFmass2antiHeliumVsPt_BetaCut", "#Delta M^{2} (#bar{He}) vs #it{p}_{T}/z; #Delta M^{2} (#bar{He}); #it{p}_{T}/z (GeV/#it{c})", HistType::kTH2F, {{massHeAxis}, {ptZHeAxis}});
           histos.add<TH2>("tracks/helium/h2TOFmass2HeliumVsPt_BetaCut", "#Delta M^{2} (He) vs #it{p}_{T}/z; #Delta M^{2} (He); #it{p}_{T}/z (GeV/#it{c})", HistType::kTH2F, {{massHeAxis}, {ptZHeAxis}});
         }
       }
       // TOF EvTime Splitting plots
-      if (enableEvTimeSplitting) {
+      if (filterOptions.enableEvTimeSplitting) {
         //  Bethe-Bloch TPC distribution - TOF EvTime Splitted
         evtimeHistos.add<TH2>("tracks/evtime/fill/h2TPCsignVsTPCmomentum", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{500, -5.f, 5.f}, {dedxAxis}});
         evtimeHistos.add<TH2>("tracks/evtime/tof/h2TPCsignVsTPCmomentum", "TPC <-dE/dX> vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TPC <-dE/dx> (a.u.)", HistType::kTH2F, {{500, -5.f, 5.f}, {dedxAxis}});
@@ -1317,7 +1753,7 @@ struct LFNucleiBATask {
         evtimeHistos.add<TH2>("tracks/evtime/ft0/h2TOFbetaVsP", "TOF #beta vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta", HistType::kTH2F, {{500, -5.f, 5.f}, {betaAxis}});
         evtimeHistos.add<TH2>("tracks/evtime/ft0tof/h2TOFbetaVsP", "TOF #beta vs #it{p}/Z; Signed #it{p} (GeV/#it{c}); TOF #beta", HistType::kTH2F, {{500, -5.f, 5.f}, {betaAxis}});
 
-        if (enableExpSignalTOF) {
+        if (outFlagOptions.enableExpSignalTOF) {
           //  TOFExpSignal histograms - TOF EvTime Splitted
           if (enablePr) {
             evtimeHistos.add<TH2>("tracks/evtime/fill/proton/h2ProtonTOFExpSignalDiffVsPt", "TOF t - t_{exp}(p) vs #it{p}_{T}; #it{p}_{T} (GeV/#it{c}); TOF t - t_{exp} (p)", HistType::kTH2F, {{ptAxis}, {2000, -25000, 25000}});
@@ -1347,24 +1783,24 @@ struct LFNucleiBATask {
 
         // NSigmaTOF histograms - TOF EvTime Splitted
         if (enablePr) {
-          evtimeHistos.add<TH2>("tracks/evtime/fill/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/fill/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/tof/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/tof/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/fill/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/fill/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/tof/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/tof/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF", "NSigmaTOF(p) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF", "NSigmaTOF(#bar{p}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
         }
         if (enableDe) {
-          evtimeHistos.add<TH2>("tracks/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF", "NSigmaTOF(d) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          evtimeHistos.add<TH2>("tracks/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF", "NSigmaTOF(#bar{d}) vs pT; #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
         }
 
         // NSigmaTPC vs NSigmaTOF histograms - TOF EvTime Splitted
@@ -1434,49 +1870,49 @@ struct LFNucleiBATask {
         // Beta < 0.5
         //  NSigmasTPC histograms
         if (enablePr) {
-          debugHistos.add<TH2>("debug/evtime/fill/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
         }
         if (enableDe) {
-          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {SigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut", "NSigmaTPC(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTPC", HistType::kTH2F, {{ptAxis}, {sigmaTPCAxis}});
         }
 
         // NSigmaTOF histograms - TOF EvTime Splitted
         if (enablePr) {
-          debugHistos.add<TH2>("debug/evtime/fill/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(p) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{p}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
         }
         if (enableDe) {
-          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
-          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {SigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(d) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
+          debugHistos.add<TH2>("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut", "NSigmaTOF(#bar{d}) vs pT (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); NSigmaTOF", HistType::kTH2F, {{ptAxis}, {sigmaTOFAxis}});
         }
 
-        if (enableExpSignalTOF) {
+        if (outFlagOptions.enableExpSignalTOF) {
           //  TOFExpSignal histograms - TOF EvTime Splitted
           if (enablePr) {
             debugHistos.add<TH2>("debug/evtime/fill/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut", "TOF t - t_{exp}(p) vs #it{p}_{T} (#beta < 0.5); #it{p}_{T} (GeV/#it{c}); TOF t - t_{exp} (p)", HistType::kTH2F, {{ptAxis}, {2000, -25000, 25000}});
@@ -1501,8 +1937,10 @@ struct LFNucleiBATask {
         }
       }
     }
-
-    if (!doprocessMCGen) {
+    // To be optimised
+    if (!doprocessMCGen && !doprocessMCReco && !doprocessMCRecoLfPid && !doprocessMCRecoFiltered && !doprocessMCRecoFilteredLight) {
+      LOG(info) << "Histograms of LFNucleiBATask:";
+      histos.print();
       return;
     }
     // MC histograms  -   all, primary, sec. from weak decay, sec. from material
@@ -1549,8 +1987,6 @@ struct LFNucleiBATask {
     spectraGen.add("kaon/histSecTransportPtantiKaon", "generated particles", HistType::kTH1F, {ptAxis});
 
     if (enablePr) {
-      // spectraGen.add("proton/histPtShift_Pr", "PtReco-PtGen vs PtReco (protons)  ", HistType::kTH2F, {{800, 0.f, 8.f}, {400, -4.f, 4.f}});
-
       spectraGen.add("proton/histGenPtProton", "generated particles", HistType::kTH1F, {ptAxis});
       spectraGen.add("proton/histGenPtProtonPrim", "generated particles", HistType::kTH1F, {ptAxis});
       spectraGen.add("proton/histGenPtProtonSec", "generated particles", HistType::kTH1F, {ptAxis});
@@ -1628,6 +2064,19 @@ struct LFNucleiBATask {
                       const TracksType& tracks,
                       const ParticleType& /*particles*/)
   {
+    histos.fill(HIST("event/eventSkimming"), 0.5);
+    // Apply skimming
+    if constexpr (!IsFilteredData) {
+      const auto& bc = event.template bc_as<o2::aod::BCsWithTimestamps>();
+      initCCDB(bc);
+      if (skimmingOptions.applySkimming) {
+        if (!zorro.isSelected(bc.globalBC())) {
+          return;
+        }
+      }
+      histos.fill(HIST("event/eventSkimming"), 1.5);
+    }
+
     // Event histos fill
     histos.fill(HIST("event/eventSelection"), 0);
     if (enableDebug)
@@ -1635,7 +2084,7 @@ struct LFNucleiBATask {
 
     if constexpr (!IsFilteredData) {
       if (!event.selection_bit(aod::evsel::kIsTriggerTVX)) {
-        if (TVXtrigger)
+        if (evselOptions.TVXtrigger)
           return;
       } else {
         histos.fill(HIST("event/eventSelection"), 1);
@@ -1644,7 +2093,7 @@ struct LFNucleiBATask {
       }
 
       if (!event.selection_bit(aod::evsel::kNoTimeFrameBorder)) {
-        if (removeTFBorder)
+        if (evselOptions.removeTFBorder)
           return;
       } else {
         histos.fill(HIST("event/eventSelection"), 2);
@@ -1653,7 +2102,7 @@ struct LFNucleiBATask {
       }
 
       if (!event.selection_bit(aod::evsel::kNoITSROFrameBorder)) {
-        if (removeITSROFBorder)
+        if (evselOptions.removeITSROFBorder)
           return;
       } else {
         histos.fill(HIST("event/eventSelection"), 3);
@@ -1667,7 +2116,7 @@ struct LFNucleiBATask {
         histos.fill(HIST("event/eventSelection"), 4);
       }
 
-      if (useSel8 && !event.sel8())
+      if (evselOptions.useSel8 && !event.sel8())
         return;
       histos.fill(HIST("event/eventSelection"), 5);
       if (enableDebug)
@@ -1688,17 +2137,17 @@ struct LFNucleiBATask {
     } else {
       if (event.posZ() < cfgLowCutVertex || event.posZ() > cfgHighCutVertex)
         return;
-      if (removeTFBorder && !event.selection_bit(aod::evsel::kNoTimeFrameBorder))
+      if (evselOptions.removeTFBorder && !event.selection_bit(aod::evsel::kNoTimeFrameBorder))
         return;
     }
 
     float gamma = 0., massTOF = 0., massTOFhe = 0., massTOFantihe = 0., heTPCmomentum = 0.f, antiheTPCmomentum = 0.f, heP = 0.f, antiheP = 0.f, hePt = 0.f, antihePt = 0.f, antiDPt = 0.f, DPt = 0.f;
-    bool isTriton = kFALSE;
-    bool prRapCut = kFALSE;
-    bool deRapCut = kFALSE;
-    bool trRapCut = kFALSE;
-    bool heRapCut = kFALSE;
-    bool alRapCut = kFALSE;
+    bool isTritonTPCpid = false;
+    bool prRapCut = false;
+    bool deRapCut = false;
+    bool trRapCut = false;
+    bool heRapCut = false;
+    bool alRapCut = false;
 
     // Event histos fill
     histos.fill(HIST("event/h1VtxZ"), event.posZ());
@@ -1710,33 +2159,46 @@ struct LFNucleiBATask {
         debugHistos.fill(HIST("event/hFV0M"), event.centFV0M());
     }
 
-    for (auto& track : tracks) {
-      histos.fill(HIST("tracks/h1pT"), track.pt());
-      histos.fill(HIST("tracks/h1p"), track.p());
+    auto tracksWithITS = soa::Attach<TracksType,
+                                     aod::pidits::ITSNSigmaTr,
+                                     aod::pidits::ITSNSigmaHe>(tracks);
+    if (tracksWithITS.size() != tracks.size()) {
+      LOG(fatal) << "Problem with track size";
+    }
 
+    tracks.copyIndexBindings(tracksWithITS);
+
+    for (auto& track : tracksWithITS) {
       if constexpr (!IsFilteredData) {
-        if (!track.isGlobalTrackWoDCA()) {
+        if (!track.isGlobalTrackWoDCA() && filterOptions.enableIsGlobalTrack) {
           continue;
         }
       }
       std::bitset<8> itsClusterMap = track.itsClusterMap();
-      if (track.itsNCls() < cfgCutITSClusters)
+      if (track.itsNCls() < trkqcOptions.cfgCutITSClusters)
         continue;
-      if (track.tpcNClsCrossedRows() < cfgCutTPCXRows)
+      if (track.tpcNClsCrossedRows() < trkqcOptions.cfgCutTPCXRows)
         continue;
-      if (track.tpcNClsFound() < cfgCutTPCClusters)
+      if (track.tpcNClsFound() < trkqcOptions.cfgCutTPCClusters)
+        continue;
+      if (track.tpcCrossedRowsOverFindableCls() < trkqcOptions.cfgCutTPCCROFnd)
+        continue;
+      auto tpcChi2NclRange = (std::vector<float>)trkqcOptions.tpcChi2NclCuts;
+      if ((track.tpcChi2NCl() < tpcChi2NclRange[0]) || (track.tpcChi2NCl() > tpcChi2NclRange[1]))
+        continue;
+      auto itsChi2NclRange = (std::vector<float>)trkqcOptions.itsChi2NclCuts;
+      if ((track.itsChi2NCl() < itsChi2NclRange[0]) || (track.itsChi2NCl() > itsChi2NclRange[1]))
         continue;
 
-      isTriton = std::abs(track.tpcNSigmaTr()) < nsigmaTPCTr;
+      if (enablePIDplot) {
+        histos.fill(HIST("tracks/h1pT"), track.pt());
+        histos.fill(HIST("tracks/h1p"), track.p());
+      }
+
+      isTritonTPCpid = std::abs(track.tpcNSigmaTr()) < nsigmaTPCvar.nsigmaTPCTr;
 
       float shiftPtPos = 0.f;
       float shiftPtNeg = 0.f;
-
-      // float shiftPPos = 0.f;
-      // float shiftPNeg = 0.f;
-
-      // float shiftTPCmomPos = 0.f;
-      // float shiftTPCmomNeg = 0.f;
 
       if (enablePtShift && !fShiftPtHe) {
         fShiftPtHe = new TF1("fShiftPtHe", "[0] * TMath::Exp([1] + [2] * x) + [3] + [4] * x", 0.f, 8.f);
@@ -1749,30 +2211,6 @@ struct LFNucleiBATask {
         auto par = (std::vector<float>)parShiftPtantiHe;
         fShiftPtantiHe->SetParameters(par[0], par[1], par[2], par[3], par[4]);
       }
-
-      // if (enablePShift && !fShiftPHe) {
-      //   fShiftPHe = new TF1("fShiftPHe", "[0] * TMath::Exp([1] + [2] * x) + [3] + [4] * x", 0.f, 8.f);
-      //   auto par = (std::vector<float>)parShiftPHe;
-      //   fShiftPHe->SetParameters(par[0], par[1], par[2], par[3], par[4]);
-      // }
-
-      // if (enablePShift && !fShiftPantiHe) {
-      //   fShiftPantiHe = new TF1("fShiftPantiHe", "[0] * TMath::Exp([1] + [2] * x) + [3] + [4] * x", 0.f, 8.f);
-      //   auto par = (std::vector<float>)parShiftPantiHe;
-      //   fShiftPantiHe->SetParameters(par[0], par[1], par[2], par[3], par[4]);
-      // }
-
-      // if (enableTPCmomShift && !fShiftTPCmomHe) {
-      //   fShiftTPCmomHe = new TF1("fShiftTPCmomHe", "[0] * TMath::Exp([1] + [2] * x) + [3] + [4] * x", 0.f, 8.f);
-      //   auto par = (std::vector<float>)parShiftPHe;
-      //   fShiftTPCmomHe->SetParameters(par[0], par[1], par[2], par[3], par[4]);
-      // }
-
-      // if (enableTPCmomShift && !fShiftTPCmomantiHe) {
-      //   fShiftTPCmomantiHe = new TF1("fShiftTPCmomantiHe", "[0] * TMath::Exp([1] + [2] * x) + [3] + [4] * x", 0.f, 8.f);
-      //   auto par = (std::vector<float>)parShiftPantiHe;
-      //   fShiftTPCmomantiHe->SetParameters(par[0], par[1], par[2], par[3], par[4]);
-      // }
 
       if (enablePtShiftAntiD && !fShiftAntiD) {
         fShiftAntiD = new TF1("fShiftAntiD", "[0] * TMath::Exp([1] + [2] * x) + [3] + [4] * x", 0.f, 8.f);
@@ -1829,121 +2267,791 @@ struct LFNucleiBATask {
           break;
       }
 
+      float nITSTr, nITSHe;
+      nITSTr = track.itsNSigmaTr();
+      nITSHe = track.itsNSigmaHe();
+
       heP = track.p();
       antiheP = track.p();
       heTPCmomentum = track.tpcInnerParam();
       antiheTPCmomentum = track.tpcInnerParam();
 
-      // if (enablePShift && fShiftPHe) {
-      //   shiftPPos = fShiftPHe->Eval(2 * track.p());
-      //   heP = track.p() - shiftPPos / 2.f;
-      // }
+      auto parDCAxy = (std::vector<float>)parDCAxycuts;
+      auto parDCAz = (std::vector<float>)parDCAzcuts;
 
-      // if (enablePShift && fShiftPantiHe) {
-      //   shiftPNeg = fShiftPantiHe->Eval(2 * track.p());
-      //   antiheP = track.p() - shiftPNeg / 2.f;
-      // }
+      bool passDCAxyCut = false;
+      bool passDCAzCut = false;
+      bool passDCAxyCutDe = false;
+      bool passDCAzCutDe = false;
+      bool passDCAxyCutAntiDe = false;
+      bool passDCAzCutAntiDe = false;
+      bool passDCAxyCutHe = false;
+      bool passDCAzCutHe = false;
+      bool passDCAxyCutAntiHe = false;
+      bool passDCAzCutAntiHe = false;
 
-      // if (enableTPCmomShift && fShiftTPCmomHe) {
-      //   shiftTPCmomPos = fShiftTPCmomHe->Eval(2 * track.tpcInnerParam());
-      //   heTPCmomentum = track.tpcInnerParam() - shiftTPCmomPos / 2.f;
-      // }
+      bool isDeuteron = false;
+      bool isHelium = false;
+      bool isDe = false;
+      bool isAntiDe = false;
+      bool isHe = false;
+      bool isAntiHe = false;
 
-      // if (enableTPCmomShift && fShiftTPCmomantiHe) {
-      //   shiftTPCmomNeg = fShiftTPCmomantiHe->Eval(2 * track.tpcInnerParam());
-      //   antiheTPCmomentum = track.tpcInnerParam() - shiftTPCmomNeg / 2.f;
-      // }
+      bool isDeWoDCAxy = false;
+      bool isAntiDeWoDCAxy = false;
+      bool isHeWoDCAxy = false;
+      bool isAntiHeWoDCAxy = false;
+
+      bool isDeWoDCAz = false;
+      bool isAntiDeWoDCAz = false;
+      bool isHeWoDCAz = false;
+      bool isAntiHeWoDCAz = false;
+
+      bool isDeWoDCAxyWTPCpid = false;
+      bool isAntiDeWoDCAxyWTPCpid = false;
+      bool isHeWoDCAxyWTPCpid = false;
+      bool isAntiHeWoDCAxyWTPCpid = false;
+
+      bool isDeWoDCAzWTPCpid = false;
+      bool isAntiDeWoDCAzWTPCpid = false;
+      bool isHeWoDCAzWTPCpid = false;
+      bool isAntiHeWoDCAzWTPCpid = false;
+
+      bool isDeWoTPCpid = false;
+      bool isAntiDeWoTPCpid = false;
+      bool isHeWoTPCpid = false;
+      bool isAntiHeWoTPCpid = false;
+
+      bool isDeWTPCpid = false;
+      bool isAntiDeWTPCpid = false;
+      bool isHeWTPCpid = false;
+      bool isAntiHeWTPCpid = false;
+
+      bool passDCAxyzCut = false;
+
+      switch (dcaConfOptions.DCACustomConfig) {
+        case 0:
+          passDCAxyCut = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCut = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+
+          passDCAxyCutDe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutDe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+          passDCAxyCutAntiDe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutAntiDe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+
+          passDCAxyCutHe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutHe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+          passDCAxyCutAntiHe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutAntiHe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+          break;
+        case 1:
+          passDCAxyCut = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(track.pt(), parDCAxy[2])));
+          passDCAzCut = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(track.pt(), parDCAz[2])));
+
+          passDCAxyCutDe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(DPt, parDCAxy[2])));
+          passDCAzCutDe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(DPt, parDCAz[2])));
+          passDCAxyCutAntiDe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antiDPt, parDCAxy[2])));
+          passDCAzCutAntiDe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antiDPt, parDCAz[2])));
+
+          passDCAxyCutHe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(hePt, parDCAxy[2])));
+          passDCAzCutHe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(hePt, parDCAz[2])));
+          passDCAxyCutAntiHe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antihePt, parDCAxy[2])));
+          passDCAzCutAntiHe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antihePt, parDCAz[2])));
+          break;
+        case 2:
+          passDCAxyCut = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(track.pt(), parDCAxy[2])));
+          passDCAzCut = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+
+          passDCAxyCutDe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(DPt, parDCAxy[2])));
+          passDCAzCutDe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+          passDCAxyCutAntiDe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antiDPt, parDCAxy[2])));
+          passDCAzCutAntiDe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+
+          passDCAxyCutHe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(hePt, parDCAxy[2])));
+          passDCAzCutHe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+          passDCAxyCutAntiHe = (std::abs(track.dcaXY()) <= parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antihePt, parDCAxy[2])));
+          passDCAzCutAntiHe = (std::abs(track.dcaZ()) <= dcaConfOptions.DCAzCustomCut);
+          break;
+        case 3:
+          passDCAxyCut = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCut = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(track.pt(), parDCAz[2])));
+
+          passDCAxyCutDe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutDe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(DPt, parDCAz[2])));
+          passDCAxyCutAntiDe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutAntiDe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antiDPt, parDCAz[2])));
+
+          passDCAxyCutHe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutHe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(hePt, parDCAz[2])));
+          passDCAxyCutAntiHe = (std::abs(track.dcaXY()) <= dcaConfOptions.DCAxyCustomCut);
+          passDCAzCutAntiHe = (std::abs(track.dcaZ()) <= parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antihePt, parDCAz[2])));
+          break;
+        case 4:
+          passDCAxyCut = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAzCut = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+
+          passDCAxyCutDe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAzCutDe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAxyCutAntiDe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAzCutAntiDe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+
+          passDCAxyCutHe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAzCutHe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAxyCutAntiHe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          passDCAzCutAntiHe = std::pow(track.dcaXY(), 2) / std::pow(dcaConfOptions.DCAxyCustomCut, 2) + std::pow(track.dcaZ(), 2) / std::pow(dcaConfOptions.DCAzCustomCut, 2) <= 1;
+          break;
+        case 5:
+          passDCAxyCut = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(track.pt(), parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(track.pt(), parDCAz[2])), 2) <= 1;
+          passDCAzCut = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(track.pt(), parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(track.pt(), parDCAz[2])), 2) <= 1;
+
+          passDCAxyCutDe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(DPt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(DPt, parDCAz[2])), 2) <= 1;
+          passDCAzCutDe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(DPt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(DPt, parDCAz[2])), 2) <= 1;
+          passDCAxyCutAntiDe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antiDPt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antiDPt, parDCAz[2])), 2) <= 1;
+          passDCAzCutAntiDe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antiDPt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antiDPt, parDCAz[2])), 2) <= 1;
+
+          passDCAxyCutHe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(hePt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(hePt, parDCAz[2])), 2) <= 1;
+          passDCAzCutHe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(hePt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(hePt, parDCAz[2])), 2) <= 1;
+          passDCAxyCutAntiHe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antihePt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antihePt, parDCAz[2])), 2) <= 1;
+          passDCAzCutAntiHe = std::pow(track.dcaXY(), 2) / std::pow(parDCAxy[3] * (parDCAxy[0] + parDCAxy[1] / std::pow(antihePt, parDCAxy[2])), 2) + std::pow(track.dcaZ(), 2) / std::pow(parDCAz[3] * (parDCAz[0] + parDCAz[1] / std::pow(antihePt, parDCAz[2])), 2) <= 1;
+          break;
+      }
 
       // p cut
-      if (TMath::Abs(track.tpcInnerParam()) < pCut)
+      if (std::abs(track.tpcInnerParam()) < kinemOptions.pCut)
+        continue;
+      // eta cut
+      if (std::abs(track.eta()) > kinemOptions.etaCut)
         continue;
 
-      // debug on helium rapidity cut
-      prRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)) > yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)) < yHighCut;
-      deRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)) > yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)) < yHighCut;
-      trRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Triton)) > yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Triton)) < yHighCut;
-      heRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)) > yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)) < yHighCut;
-      alRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Alpha)) > yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Alpha)) < yHighCut;
+      // Rapidity cuts
+      prRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)) > kinemOptions.yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)) < kinemOptions.yHighCut;
+      deRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)) > kinemOptions.yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)) < kinemOptions.yHighCut;
+      trRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Triton)) > kinemOptions.yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Triton)) < kinemOptions.yHighCut;
+      heRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)) > kinemOptions.yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)) < kinemOptions.yHighCut;
+      alRapCut = track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Alpha)) > kinemOptions.yLowCut && track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Alpha)) < kinemOptions.yHighCut;
 
+      isDeuteron = enableDe && deRapCut;
+      isHelium = enableHe && heRapCut;
+      isDe = isDeuteron && track.sign() > 0;
+      isAntiDe = isDeuteron && track.sign() < 0;
+
+      // nSigmaITSHe cut
+      if (nsigmaITSvar.useITSHeCut && (nITSHe <= nsigmaITSvar.nsigmaITSHe)) {
+        continue;
+      }
+
+      isHe = isHelium && track.sign() > 0;
+      isAntiHe = isHelium && track.sign() < 0;
+
+      isDeWoDCAxy = isDe && passDCAzCutDe;
+      isAntiDeWoDCAxy = isAntiDe && passDCAzCutAntiDe;
+      isHeWoDCAxy = isHe && passDCAzCutHe;
+      isAntiHeWoDCAxy = isAntiHe && passDCAzCutAntiHe;
+
+      isDeWoDCAz = isDe && passDCAxyCutDe;
+      isAntiDeWoDCAz = isAntiDe && passDCAxyCutAntiDe;
+      isHeWoDCAz = isHe && passDCAxyCutHe;
+      isAntiHeWoDCAz = isAntiHe && passDCAxyCutAntiHe;
+
+      isDeWoDCAxyWTPCpid = isDeWoDCAxy && std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe;
+      isAntiDeWoDCAxyWTPCpid = isAntiDeWoDCAxy && std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe;
+      isHeWoDCAxyWTPCpid = isHeWoDCAxy && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe;
+      isAntiHeWoDCAxyWTPCpid = isAntiHeWoDCAxy && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe;
+
+      isDeWoDCAzWTPCpid = isDeWoDCAz && std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe;
+      isAntiDeWoDCAzWTPCpid = isAntiDeWoDCAz && std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe;
+      isHeWoDCAzWTPCpid = isHeWoDCAz && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe;
+      isAntiHeWoDCAzWTPCpid = isAntiHeWoDCAz && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe;
+
+      isDeWoTPCpid = isDe && passDCAzCutDe && passDCAxyCutDe;
+      isAntiDeWoTPCpid = isAntiDe && passDCAzCutAntiDe && passDCAxyCutAntiDe;
+      isHeWoTPCpid = isHe && passDCAzCutHe && passDCAxyCutHe;
+      isAntiHeWoTPCpid = isAntiHe && passDCAzCutAntiHe && passDCAxyCutAntiHe;
+
+      isDeWTPCpid = isDeWoTPCpid && std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe;
+      isAntiDeWTPCpid = isAntiDeWoTPCpid && std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe;
+      isHeWTPCpid = isHeWoTPCpid && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe;
+      isAntiHeWTPCpid = isAntiHeWoTPCpid && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe;
+
+      passDCAxyzCut = passDCAxyCut && passDCAzCut;
+
+      // DCAxy vs DCAz plots BEFORE cut
+      if (outFlagOptions.makeDCABeforeCutPlots) {
+        histos.fill(HIST("tracks/dca/before/hDCAxyVsDCAzVsPt"), track.dcaXY(), track.dcaZ(), track.pt());
+        histos.fill(HIST("tracks/dca/before/hDCAxyVsDCAz"), track.dcaZ(), track.dcaXY());
+
+        if (isHe && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe) {
+          histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsDCAzVsPtHelium"), track.dcaXY(), track.dcaZ(), hePt);
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsDCAzVsPtHelium"), track.dcaXY(), track.dcaZ(), hePt);
+          }
+        }
+        if (isAntiHe && std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe) {
+          histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsDCAzVsPtantiHelium"), track.dcaXY(), track.dcaZ(), antihePt);
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsDCAzVsPtantiHelium"), track.dcaXY(), track.dcaZ(), antihePt);
+          }
+        }
+
+        if (passDCAxyCut) {
+          histos.fill(HIST("tracks/dca/before/hDCAz"), track.dcaZ());
+          histos.fill(HIST("tracks/dca/before/hDCAzVsPt"), track.pt(), track.dcaZ());
+
+          if (enablePr && prRapCut) {
+            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProton"), track.pt(), track.dcaZ());
+              } else {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProton"), track.pt(), track.dcaZ());
+              }
+            }
+          }
+          if (enableTr && trRapCut) {
+            if (isTritonTPCpid) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTriton"), track.pt(), track.dcaZ());
+              } else {
+                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTriton"), track.pt(), track.dcaZ());
+              }
+            }
+          }
+          if (enableAl && alRapCut) {
+            if (std::abs(track.tpcNSigmaAl()) < nsigmaTPCvar.nsigmaTPCAl) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlpha"), track.pt(), track.dcaZ());
+              } else {
+                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlpha"), track.pt(), track.dcaZ());
+              }
+            }
+          }
+        }
+
+        if (isDeWoDCAzWTPCpid) {
+          histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteron"), DPt, track.dcaZ());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronNoTOF"), DPt, track.dcaZ());
+        }
+
+        if (isAntiDeWoDCAzWTPCpid) {
+          histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteron"), antiDPt, track.dcaZ());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronNoTOF"), antiDPt, track.dcaZ());
+        }
+
+        if (isHeWoDCAzWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHelium"), hePt, track.dcaZ());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumNoTOF"), hePt, track.dcaZ());
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHelium"), hePt, track.dcaZ());
+          }
+        }
+
+        if (isAntiHeWoDCAzWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumNoTOF"), hePt, track.dcaZ());
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
+          }
+        }
+      }
+
+      if constexpr (IsMC) {
+        bool isPhysPrim = false;
+        bool isProdByGen = false;
+        bool isWeakDecay = false;
+
+        // PID
+        int pdgCode = 0;
+        if constexpr (IsFilteredData) {
+          isPhysPrim = track.isPhysicalPrimary();
+          isProdByGen = track.producedByGenerator();
+          isWeakDecay = track.getProcess() == 4;
+          pdgCode = track.pdgCode();
+        } else {
+          if (!track.has_mcParticle()) {
+            continue;
+          }
+          isPhysPrim = track.mcParticle().isPhysicalPrimary();
+          isProdByGen = track.mcParticle().producedByGenerator();
+          isWeakDecay = track.mcParticle().getProcess() == 4;
+          pdgCode = track.mcParticle().pdgCode();
+        }
+
+        if (outFlagOptions.makeDCABeforeCutPlots) {
+          switch (pdgCode) {
+            case PDGProton:
+              if (enablePr && prRapCut && passDCAxyCut) {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrue"), track.pt(), track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrue"), track.pt(), track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTruePrim"), track.pt(), track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTruePrim"), track.pt(), track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrueTransport"), track.pt(), track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrueSec"), track.pt(), track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrueMaterial"), track.pt(), track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrueTransport"), track.pt(), track.dcaZ());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrueSec"), track.pt(), track.dcaZ());
+                    else
+                      histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtProtonTrueMaterial"), track.pt(), track.dcaZ());
+                  }
+                }
+              }
+              break;
+            case -PDGProton:
+              if (enablePr && prRapCut && passDCAxyCut) {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrue"), track.pt(), track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrue"), track.pt(), track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTruePrim"), track.pt(), track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTruePrim"), track.pt(), track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueTransport"), track.pt(), track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueSec"), track.pt(), track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueMaterial"), track.pt(), track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrueTransport"), hePt, track.dcaZ());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrueSec"), hePt, track.dcaZ());
+                    else
+                      histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAzVsPtantiProtonTrueMaterial"), hePt, track.dcaZ());
+                  }
+                }
+              }
+              break;
+            case PDGDeuteron:
+              if (isDeWoDCAz) {
+                histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrue"), DPt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrue"), DPt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTruePrim"), DPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTruePrim"), DPt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueTransport"), DPt, track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueSec"), DPt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueMaterial"), DPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrueTransport"), DPt, track.dcaZ());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrueSec"), DPt, track.dcaZ());
+                    else
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtDeuteronTrueMaterial"), DPt, track.dcaZ());
+                  }
+                }
+              }
+              break;
+            case -PDGDeuteron:
+              if (isAntiDeWoDCAz) {
+                histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrue"), antiDPt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrue"), antiDPt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTruePrim"), antiDPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTruePrim"), antiDPt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueSec"), antiDPt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueMaterial"), antiDPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaZ());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrueSec"), antiDPt, track.dcaZ());
+                    else
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAzVsPtantiDeuteronTrueMaterial"), antiDPt, track.dcaZ());
+                  }
+                }
+              }
+              break;
+            case PDGTriton:
+              if (enableTr && trRapCut && passDCAxyCut) {
+                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrue"), track.pt(), track.dcaZ());
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTruePrim"), track.pt(), track.dcaZ());
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrueTransport"), track.pt(), track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrueSec"), track.pt(), track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrueMaterial"), track.pt(), track.dcaZ());
+                }
+              }
+              break;
+            case -PDGTriton:
+              if (enableTr && trRapCut && passDCAxyCut) {
+                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrue"), track.pt(), track.dcaZ());
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTruePrim"), track.pt(), track.dcaZ());
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueTransport"), track.pt(), track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueSec"), track.pt(), track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueMaterial"), track.pt(), track.dcaZ());
+                }
+              }
+              break;
+            case PDGHelium:
+              if (isHeWoDCAz) {
+                histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrueMaterial"), hePt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                    else
+                      histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueMaterial"), hePt, track.dcaZ());
+                  }
+                }
+              }
+              if constexpr (!IsFilteredData) {
+                if ((event.has_mcCollision() && (track.mcParticle().mcCollisionId() != event.mcCollisionId())) || !event.has_mcCollision()) {
+                  if (isHeWoDCAz && outFlagOptions.makeWrongEventPlots) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
+                    }
+                    if (isPhysPrim) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
+                      if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
+                      }
+                    }
+                    if (!isPhysPrim && !isProdByGen) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
+                      if (isWeakDecay) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                      }
+                      if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
+                        if (isWeakDecay) {
+                          histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              break;
+            case -PDGHelium:
+              if (isAntiHeWoDCAz) {
+                histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueMaterial"), antihePt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                    else
+                      histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueMaterial"), antihePt, track.dcaZ());
+                  }
+                }
+              }
+              if constexpr (!IsFilteredData) {
+                if ((event.has_mcCollision() && (track.mcParticle().mcCollisionId() != event.mcCollisionId())) || !event.has_mcCollision()) {
+                  if (isAntiHeWoDCAz && outFlagOptions.makeWrongEventPlots) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
+                    }
+                    if (isPhysPrim) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
+                      if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
+                      }
+                    }
+                    if (!isPhysPrim && !isProdByGen) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
+                      if (isWeakDecay) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                      }
+                      if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
+                        if (isWeakDecay) {
+                          histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              break;
+            case PDGAlpha:
+              if (enableAl && alRapCut && passDCAxyCut) {
+                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrue"), track.pt(), track.dcaZ());
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTruePrim"), track.pt(), track.dcaZ());
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueTransport"), track.pt(), track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueSec"), track.pt(), track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueMaterial"), track.pt(), track.dcaZ());
+                }
+              }
+              break;
+            case -PDGAlpha:
+              if (enableAl && alRapCut && passDCAxyCut) {
+                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrue"), track.pt(), track.dcaZ());
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTruePrim"), track.pt(), track.dcaZ());
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueTransport"), track.pt(), track.dcaZ());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueSec"), track.pt(), track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueMaterial"), track.pt(), track.dcaZ());
+                }
+              }
+              break;
+            default:
+              break;
+          }
+          switch (std::abs(pdgCode)) {
+            case PDGDeuteron:
+              //
+              break;
+            default:
+              if (isDeWoDCAzWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+                histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTrue"), DPt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTrue"), DPt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTruePrim"), DPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTruePrim"), DPt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTrueTransport"), DPt, track.dcaZ());
+                  if (isWeakDecay) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtDeuteronTrueSec"), DPt, track.dcaZ());
+                  }
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTrueTransport"), DPt, track.dcaZ());
+                    if (isWeakDecay) {
+                      histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtDeuteronTrueSec"), DPt, track.dcaZ());
+                    }
+                  }
+                }
+              } else if (isAntiDeWoDCAzWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+                histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTrue"), antiDPt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTrue"), antiDPt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTruePrim"), antiDPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTruePrim"), antiDPt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaZ());
+                  if (isWeakDecay) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAzVsPtantiDeuteronTrueSec"), antiDPt, track.dcaZ());
+                  }
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaZ());
+                    if (isWeakDecay) {
+                      histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAzVsPtantiDeuteronTrueSec"), antiDPt, track.dcaZ());
+                    }
+                  }
+                }
+              }
+              break;
+          }
+
+          switch (std::abs(pdgCode)) {
+            case PDGHelium:
+              //
+              break;
+            default:
+              if (isHeWoDCAzWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+                histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
+                  if (isWeakDecay) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                  }
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
+                    if (isWeakDecay) {
+                      histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                    }
+                  }
+                }
+              }
+              if (isAntiHeWoDCAzWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+                histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
+                  if (isWeakDecay) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                  }
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
+                    if (isWeakDecay) {
+                      histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                    }
+                  }
+                }
+              }
+              break;
+          }
+        }
+      }
       // Tracks DCA histos fill
-      if (makeDCABeforeCutPlots) {
-        histos.fill(HIST("tracks/dca/before/hDCAxy"), track.dcaXY());
-        histos.fill(HIST("tracks/dca/before/hDCAz"), track.dcaZ());
-        // histos.fill(HIST("tracks/dca/before/hDCAxyVsDCAz"), track.dcaXY(), track.dcaZ());
-        histos.fill(HIST("tracks/dca/before/hDCAxyVsPt"), track.pt(), track.dcaXY());
-        histos.fill(HIST("tracks/dca/before/hDCAzVsPt"), track.pt(), track.dcaZ());
+      if (outFlagOptions.makeDCABeforeCutPlots) {
+        if (passDCAzCut) {
+          histos.fill(HIST("tracks/dca/before/hDCAxy"), track.dcaXY());
+          histos.fill(HIST("tracks/dca/before/hDCAxyVsPt"), track.pt(), track.dcaXY());
 
-        if (enablePr && prRapCut) {
-          if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) {
-            if (track.sign() > 0) {
-              histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProton"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProton"), track.pt(), track.dcaZ());
-            } else {
-              histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProton"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProton"), track.pt(), track.dcaZ());
+          if (enablePr && prRapCut) {
+            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProton"), track.pt(), track.dcaXY());
+              } else {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProton"), track.pt(), track.dcaXY());
+              }
+            }
+          }
+
+          if (enableTr && trRapCut) {
+            if (isTritonTPCpid) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTriton"), track.pt(), track.dcaXY());
+              } else {
+                histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTriton"), track.pt(), track.dcaXY());
+              }
+            }
+          }
+          if (enableAl && alRapCut) {
+            if (std::abs(track.tpcNSigmaAl()) < nsigmaTPCvar.nsigmaTPCAl) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlpha"), track.pt(), track.dcaXY());
+              } else {
+                histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlpha"), track.pt(), track.dcaXY());
+              }
             }
           }
         }
-        if (enableDe && deRapCut) {
-          if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) {
-            if (usenITSLayer && !itsClusterMap.test(nITSLayer))
-              continue;
-            if (track.sign() > 0) {
-              if (enableCentrality)
-                histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronVsMult"), DPt, track.dcaXY(), event.centFT0M());
-              else
-                histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteron"), DPt, track.dcaXY());
-              histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteron"), DPt, track.dcaZ());
-            } else {
-              if (enableCentrality)
-                histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronVsMult"), antiDPt, track.dcaXY(), event.centFT0M());
-              else
-                histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteron"), antiDPt, track.dcaXY());
-              histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteron"), antiDPt, track.dcaZ());
-            }
+
+        if (isDeWoDCAxyWTPCpid) {
+          if (usenITSLayer && !itsClusterMap.test(trkqcOptions.nITSLayer))
+            continue;
+          if (enableCentrality)
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronVsMult"), DPt, track.dcaXY(), event.centFT0M());
+          else
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteron"), DPt, track.dcaXY());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronNoTOF"), DPt, track.dcaXY());
+        }
+        if (isAntiDeWoDCAxyWTPCpid) {
+          if (usenITSLayer && !itsClusterMap.test(trkqcOptions.nITSLayer))
+            continue;
+          if (enableCentrality)
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronVsMult"), antiDPt, track.dcaXY(), event.centFT0M());
+          else
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteron"), antiDPt, track.dcaXY());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronNoTOF"), antiDPt, track.dcaXY());
+        }
+
+        if (isHeWoDCAxyWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHelium"), hePt, track.dcaXY());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHeliumNoTOF"), hePt, track.dcaXY());
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHelium"), hePt, track.dcaXY());
           }
         }
-        if (enableTr && trRapCut) {
-          if (isTriton) {
-            if (track.sign() > 0) {
-              histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTriton"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTriton"), track.pt(), track.dcaZ());
-            } else {
-              histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTriton"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTriton"), track.pt(), track.dcaZ());
-            }
-          }
-        }
-      }
-      if (enableHe && heRapCut && makeDCABeforeCutPlots) {
-        if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) {
-          if (track.sign() > 0) {
-            histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHelium"), hePt, track.dcaXY());
-            histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHelium"), hePt, track.dcaZ());
-            if (track.hasTOF() && doTOFplots) {
-              histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHelium"), hePt, track.dcaXY());
-              histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHelium"), hePt, track.dcaZ());
-            }
-          } else {
-            histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
-            histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
-            if (track.hasTOF() && doTOFplots) {
-              histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
-              histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
-            }
-          }
-        }
-      }
-      if (makeDCABeforeCutPlots) {
-        if (enableAl && alRapCut) {
-          if (std::abs(track.tpcNSigmaAl()) < nsigmaTPCAl) {
-            if (track.sign() > 0) {
-              histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlpha"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlpha"), track.pt(), track.dcaZ());
-            } else {
-              histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlpha"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlpha"), track.pt(), track.dcaZ());
-            }
+        if (isAntiHeWoDCAxyWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
+          if (!track.hasTOF())
+            histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHeliumNoTOF"), antihePt, track.dcaXY());
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
           }
         }
       }
@@ -1963,7 +3071,7 @@ struct LFNucleiBATask {
           isProdByGen = track.producedByGenerator();
           isWeakDecay = track.getProcess() == 4;
           pdgCode = track.pdgCode();
-          genPt = TMath::Sqrt(TMath::Power(track.px(), 2) + TMath::Power(track.py(), 2));
+          genPt = std::sqrt(std::pow(track.px(), 2) + std::pow(track.py(), 2));
 
         } else {
           if (!track.has_mcParticle()) {
@@ -1981,81 +3089,81 @@ struct LFNucleiBATask {
               break;
             }
           }
-          if (hasFakeHit) {
+          if (hasFakeHit && passDCAzCut) {
             debugHistos.fill(HIST("debug/h2TPCsignVsTPCmomentum_FakeHits"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
           }
         }
         switch (pdgCode) {
           case PDGProton:
-            if (enablePr && prRapCut && makeDCABeforeCutPlots) {
-              {
-                // if (makeDCABeforeCutPlots) {
-                histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProtonTrue"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrue"), track.pt(), track.dcaZ());
-                // }
+            if (enablePr && prRapCut && outFlagOptions.makeDCABeforeCutPlots && passDCAzCut) {
+              histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProtonTrue"), track.pt(), track.dcaXY());
+              if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrue"), track.pt(), track.dcaXY());
               }
               if (isPhysPrim) {
-                // if constexpr (!IsFilteredData) {
-                //   spectraGen.fill(HIST("proton/histPtShift_Pr"), track.pt(), track.pt() - track.mcParticle().pt());
-                // }
-                // if (makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProtonTruePrim"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTruePrim"), track.pt(), track.dcaZ());
-                // }
-              }
-              if (!isPhysPrim && isProdByGen) {
-                //
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTruePrim"), track.pt(), track.dcaXY());
+                }
               }
               if (!isPhysPrim && !isProdByGen) {
-                // if (makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProtonTrueTransport"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrueTransport"), track.pt(), track.dcaZ());
-                if (isWeakDecay) {
+                if (isWeakDecay)
                   histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProtonTrueSec"), track.pt(), track.dcaXY());
-                  histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtProtonTrueSec"), track.pt(), track.dcaZ());
+                else
+                  histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtProtonTrueMaterial"), track.pt(), track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrueTransport"), track.pt(), track.dcaXY());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrueSec"), track.pt(), track.dcaXY());
+                  else
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtProtonTrueMaterial"), track.pt(), track.dcaXY());
                 }
-                // }
               }
             }
             break;
           case -PDGProton:
-            if (enablePr && prRapCut && makeDCABeforeCutPlots) {
-              // if (makeDCABeforeCutPlots) {
+            if (enablePr && prRapCut && outFlagOptions.makeDCABeforeCutPlots && passDCAzCut) {
               histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrue"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrue"), track.pt(), track.dcaZ());
-              // }
-
-              if (isPhysPrim) {
-                // if (makeDCABeforeCutPlots) {
-                histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProtonTruePrim"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTruePrim"), track.pt(), track.dcaZ());
-                // }
+              if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrue"), track.pt(), track.dcaXY());
               }
-              if (!isPhysPrim && isProdByGen) {
-                //
+              if (isPhysPrim) {
+                histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProtonTruePrim"), track.pt(), track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTruePrim"), track.pt(), track.dcaXY());
+                }
               }
               if (!isPhysPrim && !isProdByGen) {
-                // if (makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrueTransport"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueTransport"), track.pt(), track.dcaZ());
-                if (isWeakDecay) {
+                if (isWeakDecay)
                   histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrueSec"), track.pt(), track.dcaXY());
-                  histos.fill(HIST("tracks/proton/dca/before/hDCAzVsPtantiProtonTrueSec"), track.pt(), track.dcaZ());
+                else
+                  histos.fill(HIST("tracks/proton/dca/before/hDCAxyVsPtantiProtonTrueMaterial"), track.pt(), track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrueTransport"), track.pt(), track.dcaXY());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrueSec"), track.pt(), track.dcaXY());
+                  else
+                    histos.fill(HIST("tracks/proton/dca/before/TOF/hDCAxyVsPtantiProtonTrueMaterial"), track.pt(), track.dcaXY());
                 }
-                // }
               }
             }
             break;
           case PDGDeuteron:
-            if (enableDe && deRapCut) {
-              if (makeDCABeforeCutPlots) {
+            if (isDeWoDCAxy) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrue"), DPt, track.dcaXY());
-                histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrue"), DPt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrue"), DPt, track.dcaXY());
+                }
               }
               if (isPhysPrim) {
-                if (makeDCABeforeCutPlots) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTruePrim"), DPt, track.dcaXY());
-                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTruePrim"), DPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTruePrim"), DPt, track.dcaXY());
+                  }
                 }
                 if constexpr (IsFilteredData) {
                   spectraGen.fill(HIST("deuteron/histDeuteronPtShift"), track.pt(), track.pt() - genPt);
@@ -2074,27 +3182,37 @@ struct LFNucleiBATask {
                 }
               }
               if (!isPhysPrim && !isProdByGen) {
-                if (makeDCABeforeCutPlots) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrueTransport"), DPt, track.dcaXY());
-                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueTransport"), DPt, track.dcaZ());
-                  if (isWeakDecay) {
+                  if (isWeakDecay)
                     histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrueSec"), DPt, track.dcaXY());
-                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtDeuteronTrueSec"), DPt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtDeuteronTrueMaterial"), DPt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrueTransport"), DPt, track.dcaXY());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrueSec"), DPt, track.dcaXY());
+                    else
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtDeuteronTrueMaterial"), DPt, track.dcaXY());
                   }
                 }
               }
             }
             break;
           case -PDGDeuteron:
-            if (enableDe && deRapCut) {
-              if (makeDCABeforeCutPlots) {
+            if (isAntiDeWoDCAxy) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrue"), antiDPt, track.dcaXY());
-                histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrue"), antiDPt, track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrue"), antiDPt, track.dcaXY());
+                }
               }
               if (isPhysPrim) {
-                if (makeDCABeforeCutPlots) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTruePrim"), antiDPt, track.dcaXY());
-                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTruePrim"), antiDPt, track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTruePrim"), antiDPt, track.dcaXY());
+                  }
                 }
                 if constexpr (IsFilteredData) {
                   spectraGen.fill(HIST("deuteron/histAntiDeuteronPtShift"), track.pt(), track.pt() - genPt);
@@ -2113,70 +3231,97 @@ struct LFNucleiBATask {
                 }
               }
               if (!isPhysPrim && !isProdByGen) {
-                if (makeDCABeforeCutPlots) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaXY());
-                  histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaZ());
-                  if (isWeakDecay) {
+                  if (isWeakDecay)
                     histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrueSec"), antiDPt, track.dcaXY());
-                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAzVsPtantiDeuteronTrueSec"), antiDPt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/deuteron/dca/before/hDCAxyVsPtantiDeuteronTrueMaterial"), antiDPt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaXY());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrueSec"), antiDPt, track.dcaXY());
+                    else
+                      histos.fill(HIST("tracks/deuteron/dca/before/TOF/hDCAxyVsPtantiDeuteronTrueMaterial"), antiDPt, track.dcaXY());
                   }
                 }
               }
             }
             break;
           case PDGTriton:
-            if (enableTr && trRapCut && makeDCABeforeCutPlots) {
+            if (enableTr && trRapCut && outFlagOptions.makeDCABeforeCutPlots && passDCAzCut) {
               histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTritonTrue"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrue"), track.pt(), track.dcaZ());
+              if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrue"), track.pt(), track.dcaXY());
+              }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTritonTruePrim"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTruePrim"), track.pt(), track.dcaZ());
-              }
-              if (!isPhysPrim && isProdByGen) {
-                //
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTruePrim"), track.pt(), track.dcaXY());
+                }
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTritonTrueTransport"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrueTransport"), track.pt(), track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrueTransport"), track.pt(), track.dcaXY());
+                }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTritonTrueSec"), track.pt(), track.dcaXY());
-                  histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtTritonTrueSec"), track.pt(), track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrueSec"), track.pt(), track.dcaXY());
+                  }
+                } else {
+                  histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtTritonTrueMaterial"), track.pt(), track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtTritonTrueMaterial"), track.pt(), track.dcaXY());
+                  }
                 }
               }
             }
             break;
           case -PDGTriton:
-            if (enableTr && trRapCut && makeDCABeforeCutPlots) {
+            if (enableTr && trRapCut && outFlagOptions.makeDCABeforeCutPlots && passDCAzCut) {
               histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrue"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrue"), track.pt(), track.dcaZ());
+              if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrue"), track.pt(), track.dcaXY());
+              }
+
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTritonTruePrim"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTruePrim"), track.pt(), track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTruePrim"), track.pt(), track.dcaXY());
+                }
               }
               if (!isPhysPrim && isProdByGen) {
                 //
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrueTransport"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueTransport"), track.pt(), track.dcaZ());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrueTransport"), track.pt(), track.dcaXY());
+                }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrueSec"), track.pt(), track.dcaXY());
-                  histos.fill(HIST("tracks/triton/dca/before/hDCAzVsPtantiTritonTrueSec"), track.pt(), track.dcaZ());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrueSec"), track.pt(), track.dcaXY());
+                  }
+                } else {
+                  histos.fill(HIST("tracks/triton/dca/before/hDCAxyVsPtantiTritonTrueMaterial"), track.pt(), track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/triton/dca/before/TOF/hDCAxyVsPtantiTritonTrueMaterial"), track.pt(), track.dcaXY());
+                  }
                 }
               }
             }
             break;
           case PDGHelium:
-            if (enableHe && heRapCut) {
-              if (makeDCABeforeCutPlots) {
+            if (isHeWoDCAxy) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
-                histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
-                if (track.hasTOF() && doTOFplots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
                 }
               }
-
               if (isPhysPrim) {
                 if constexpr (!IsFilteredData) {
                   spectraGen.fill(HIST("helium/histPtGenHe"), std::abs(track.mcParticle().pt()));
@@ -2189,53 +3334,63 @@ struct LFNucleiBATask {
                   spectraGen.fill(HIST("helium/histPShiftHe"), 2.f * heP, 2.f * heP - track.mcParticle().p());
                   spectraGen.fill(HIST("helium/histPShiftVsEtaHe"), track.eta(), 2.f * heP - track.mcParticle().p());
                 }
-                if (makeDCABeforeCutPlots) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
                   histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
-                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
                   }
                 }
               }
-              // if (!isPhysPrim && isProdByGen) {
-              //   //
-              //   if (track.hasTOF() && doTOFplots) {
-              //     //
-              //   }
-              // }
-              if (!isPhysPrim && !isProdByGen && makeDCABeforeCutPlots) {
-                // if (makeDCABeforeCutPlots) {
+              if (!isPhysPrim && !isProdByGen && outFlagOptions.makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
-                histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
-
-                if (isWeakDecay) {
+                if (isWeakDecay)
                   histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
-                }
-                // }
-
-                if (track.hasTOF() && doTOFplots) {
-                  // if (makeDCABeforeCutPlots) {
+                else
+                  histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtHeliumTrueMaterial"), hePt, track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
-                  if (isWeakDecay) {
+                  if (isWeakDecay)
                     histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
-                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtHeliumTrueMaterial"), hePt, track.dcaXY());
+                }
+              }
+            }
+            if constexpr (!IsFilteredData) {
+              if ((event.has_mcCollision() && (track.mcParticle().mcCollisionId() != event.mcCollisionId())) || !event.has_mcCollision()) {
+                if (isHeWoDCAxy && outFlagOptions.makeDCABeforeCutPlots && outFlagOptions.makeWrongEventPlots) {
+                  histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
                   }
-                  // }
+                  if (isPhysPrim) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
+                    }
+                  }
+                  if (!isPhysPrim && !isProdByGen) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
+                    if (isWeakDecay) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
+                    }
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
+                      if (isWeakDecay) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
+                      }
+                    }
+                  }
                 }
               }
             }
             break;
           case -PDGHelium:
-            if (enableHe && heRapCut) {
-              if (makeDCABeforeCutPlots) {
+            if (isAntiHeWoDCAxy) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
-                histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
-                if (track.hasTOF() && doTOFplots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
                 }
               }
               if (isPhysPrim) {
@@ -2250,95 +3405,238 @@ struct LFNucleiBATask {
                   spectraGen.fill(HIST("helium/histPShiftantiHe"), 2.f * antiheP, 2.f * antiheP - track.mcParticle().p());
                   spectraGen.fill(HIST("helium/histPShiftVsEtaantiHe"), track.eta(), 2.f * antiheP - track.mcParticle().p());
                 }
-                if (makeDCABeforeCutPlots) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
                   histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
-                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
                   }
                 }
               }
-              if (!isPhysPrim && !isProdByGen && makeDCABeforeCutPlots) {
-                // if (makeDCABeforeCutPlots) {
+              if (!isPhysPrim && !isProdByGen && outFlagOptions.makeDCABeforeCutPlots) {
                 histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
-                histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
-                if (isWeakDecay) {
+                if (isWeakDecay)
                   histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
-                }
-                // }
+                else
+                  histos.fill(HIST("tracks/helium/dca/before/hDCAxyVsPtantiHeliumTrueMaterial"), antihePt, track.dcaXY());
 
-                if (track.hasTOF() && doTOFplots) {
-                  // if (makeDCABeforeCutPlots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
-                  histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
-                  if (isWeakDecay) {
+                  if (isWeakDecay)
                     histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
-                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
+                  else
+                    histos.fill(HIST("tracks/helium/dca/before/TOF/hDCAxyVsPtantiHeliumTrueMaterial"), antihePt, track.dcaXY());
+                }
+              }
+            }
+            if constexpr (!IsFilteredData) {
+              if ((event.has_mcCollision() && (track.mcParticle().mcCollisionId() != event.mcCollisionId())) || !event.has_mcCollision()) {
+                if (isAntiHeWoDCAxy && outFlagOptions.makeDCABeforeCutPlots && outFlagOptions.makeWrongEventPlots) {
+                  histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
                   }
-                  // }
+                  if (isPhysPrim) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
+                    }
+                  }
+                  if (!isPhysPrim && !isProdByGen) {
+                    histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
+                    if (isWeakDecay) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
+                    }
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                      histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
+                      if (isWeakDecay) {
+                        histos.fill(HIST("tracks/helium/dca/before/wrong/TOF/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
+                      }
+                    }
+                  }
                 }
               }
             }
             break;
           case PDGAlpha:
-            if (enableAl && alRapCut && makeDCABeforeCutPlots) {
+            if (enableAl && alRapCut && outFlagOptions.makeDCABeforeCutPlots && passDCAzCut) {
               histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrue"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrue"), track.pt(), track.dcaZ());
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlphaTruePrim"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTruePrim"), track.pt(), track.dcaZ());
               }
-              // if (!isPhysPrim && isProdByGen) {
-              //   //
-              // }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrueTransport"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueTransport"), track.pt(), track.dcaZ());
-                if (isWeakDecay) {
+                if (isWeakDecay)
                   histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrueSec"), track.pt(), track.dcaXY());
-                  histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtAlphaTrueSec"), track.pt(), track.dcaZ());
-                }
+                else
+                  histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtAlphaTrueMaterial"), track.pt(), track.dcaXY());
               }
             }
             break;
           case -PDGAlpha:
-            if (enableAl && alRapCut && makeDCABeforeCutPlots) {
+            if (enableAl && alRapCut && outFlagOptions.makeDCABeforeCutPlots && passDCAzCut) {
               histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrue"), track.pt(), track.dcaXY());
-              histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrue"), track.pt(), track.dcaZ());
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTruePrim"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTruePrim"), track.pt(), track.dcaZ());
               }
-              // if (!isPhysPrim && isProdByGen) {
-              //   //
-              // }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrueTransport"), track.pt(), track.dcaXY());
-                histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueTransport"), track.pt(), track.dcaZ());
-                if (isWeakDecay) {
+                if (isWeakDecay)
                   histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrueSec"), track.pt(), track.dcaXY());
-                  histos.fill(HIST("tracks/alpha/dca/before/hDCAzVsPtantiAlphaTrueSec"), track.pt(), track.dcaZ());
-                }
+                else
+                  histos.fill(HIST("tracks/alpha/dca/before/hDCAxyVsPtantiAlphaTrueMaterial"), track.pt(), track.dcaXY());
               }
             }
             break;
           default:
             break;
         }
+        switch (std::abs(pdgCode)) {
+          case PDGDeuteron:
+            //
+            break;
+          default:
+            if (isDeWoDCAxyWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
+                histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrue"), DPt, track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrue"), DPt, track.dcaXY());
+                }
+              }
+              if (isPhysPrim) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTruePrim"), DPt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTruePrim"), DPt, track.dcaXY());
+                  }
+                }
+              }
+              if (!isPhysPrim && !isProdByGen) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrueTransport"), DPt, track.dcaXY());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrueSec"), DPt, track.dcaXY());
+                  else
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtDeuteronTrueMaterial"), DPt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrueTransport"), DPt, track.dcaXY());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrueSec"), DPt, track.dcaXY());
+                    else
+                      histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtDeuteronTrueMaterial"), DPt, track.dcaXY());
+                  }
+                }
+              }
+            }
+            if (isAntiDeWoDCAxyWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
+                histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrue"), antiDPt, track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrue"), antiDPt, track.dcaXY());
+                }
+              }
+              if (isPhysPrim) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTruePrim"), antiDPt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTruePrim"), antiDPt, track.dcaXY());
+                  }
+                }
+              }
+              if (!isPhysPrim && !isProdByGen) {
+                if (outFlagOptions.makeDCABeforeCutPlots) {
+                  histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaXY());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrueSec"), antiDPt, track.dcaXY());
+                  else
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/hDCAxyVsPtantiDeuteronTrueMaterial"), antiDPt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaXY());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrueSec"), antiDPt, track.dcaXY());
+                    else
+                      histos.fill(HIST("tracks/deuteron/dca/before/fake/TOF/hDCAxyVsPtantiDeuteronTrueMaterial"), antiDPt, track.dcaXY());
+                  }
+                }
+              }
+            }
+            break;
+        }
+
+        switch (std::abs(pdgCode)) {
+          case PDGHelium:
+            //
+            break;
+          default:
+            if (isHeWoDCAxyWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
+                histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
+                  else
+                    histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtHeliumTrueMaterial"), hePt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
+                    else
+                      histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtHeliumTrueMaterial"), hePt, track.dcaXY());
+                  }
+                }
+              }
+            }
+            if (isAntiHeWoDCAxyWTPCpid && outFlagOptions.makeFakeTracksPlots) {
+              if (outFlagOptions.makeDCABeforeCutPlots) {
+                histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
+                }
+                if (isPhysPrim) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
+                  }
+                }
+                if (!isPhysPrim && !isProdByGen) {
+                  histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
+                  if (isWeakDecay)
+                    histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
+                  else
+                    histos.fill(HIST("tracks/helium/dca/before/fake/hDCAxyVsPtantiHeliumTrueMaterial"), antihePt, track.dcaXY());
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
+                    histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
+                    if (isWeakDecay)
+                      histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
+                    else
+                      histos.fill(HIST("tracks/helium/dca/before/fake/TOF/hDCAxyVsPtantiHeliumTrueMaterial"), antihePt, track.dcaXY());
+                  }
+                }
+              }
+            }
+            break;
+        }
       }
 
       // DCA Cut
       if constexpr (!IsFilteredData) {
-        if (!enableDCACustomCut) {
-          if (!track.isGlobalTrack())
-            continue;
-        } else {
-          if (!track.isGlobalTrackWoDCA())
-            continue;
-          if ((std::abs(track.dcaXY()) > DCAxyCustomCut) || (std::abs(track.dcaZ()) > DCAzCustomCut))
-            continue;
+        if (filterOptions.enableIsGlobalTrack) {
+          if (!enableDCACustomCut) {
+            if (!track.isGlobalTrack())
+              continue;
+          } else {
+            if (!track.isGlobalTrackWoDCA())
+              continue;
+          }
         }
       }
 
@@ -2346,751 +3644,738 @@ struct LFNucleiBATask {
         continue;
       }
 
-      if (makeDCAAfterCutPlots) {
-        histos.fill(HIST("tracks/dca/after/hDCAxy"), track.dcaXY());
-        histos.fill(HIST("tracks/dca/after/hDCAz"), track.dcaZ());
-        // histos.fill(HIST("tracks/dca/after/hDCAxyVsDCAz"), track.dcaXY(), track.dcaZ());
-        histos.fill(HIST("tracks/dca/after/hDCAxyVsPt"), track.pt(), track.dcaXY());
-        histos.fill(HIST("tracks/dca/after/hDCAzVsPt"), track.pt(), track.dcaZ());
-      }
-      if (enablePr && prRapCut && makeDCAAfterCutPlots) {
-        if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) {
-          if (track.sign() > 0) {
-            histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtProton"), track.pt(), track.dcaXY());
-            histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtProton"), track.pt(), track.dcaZ());
-          } else {
-            histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtantiProton"), track.pt(), track.dcaXY());
-            histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtantiProton"), track.pt(), track.dcaZ());
+      if (outFlagOptions.makeDCAAfterCutPlots) {
+
+        if (isHeWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsDCAzVsPtHelium"), track.dcaXY(), track.dcaZ(), hePt);
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsDCAzVsPtHelium"), track.dcaXY(), track.dcaZ(), hePt);
           }
         }
-      }
-      if (enableDe && deRapCut && makeDCAAfterCutPlots) {
-        if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) {
+        if (isAntiHeWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsDCAzVsPtantiHelium"), track.dcaXY(), track.dcaZ(), antihePt);
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsDCAzVsPtantiHelium"), track.dcaXY(), track.dcaZ(), antihePt);
+          }
+        }
 
-          if (usenITSLayer && !itsClusterMap.test(nITSLayer))
+        if (passDCAxyzCut) {
+          histos.fill(HIST("tracks/dca/after/hDCAxy"), track.dcaXY());
+          histos.fill(HIST("tracks/dca/after/hDCAz"), track.dcaZ());
+          histos.fill(HIST("tracks/dca/after/hDCAxyVsPt"), track.pt(), track.dcaXY());
+          histos.fill(HIST("tracks/dca/after/hDCAzVsPt"), track.pt(), track.dcaZ());
+
+          if (enablePr && prRapCut) {
+            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtProton"), track.pt(), track.dcaXY());
+                histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtProton"), track.pt(), track.dcaZ());
+              } else {
+                histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtantiProton"), track.pt(), track.dcaXY());
+                histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtantiProton"), track.pt(), track.dcaZ());
+              }
+            }
+          }
+          if (enableTr && trRapCut) {
+            if (isTritonTPCpid) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtTriton"), track.pt(), track.dcaXY());
+                histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtTriton"), track.pt(), track.dcaZ());
+              } else {
+                histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtantiTriton"), track.pt(), track.dcaXY());
+                histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtantiTriton"), track.pt(), track.dcaZ());
+              }
+            }
+          }
+          if (enableAl && alRapCut) {
+            if (std::abs(track.tpcNSigmaAl()) < nsigmaTPCvar.nsigmaTPCAl) {
+              if (track.sign() > 0) {
+                histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtAlpha"), track.pt(), track.dcaXY());
+                histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtAlpha"), track.pt(), track.dcaZ());
+              } else {
+                histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtantiAlpha"), track.pt(), track.dcaXY());
+                histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtantiAlpha"), track.pt(), track.dcaZ());
+              }
+            }
+          }
+        }
+        if (isDeWTPCpid) {
+          if (usenITSLayer && !itsClusterMap.test(trkqcOptions.nITSLayer))
             continue;
+          histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteron"), DPt, track.dcaXY());
+          histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteron"), DPt, track.dcaZ());
+        }
+        if (isAntiDeWTPCpid) {
+          if (usenITSLayer && !itsClusterMap.test(trkqcOptions.nITSLayer))
+            continue;
+          histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteron"), antiDPt, track.dcaXY());
+          histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteron"), antiDPt, track.dcaZ());
+        }
+        if (isHeWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtHelium"), hePt, track.dcaXY());
+          histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtHelium"), hePt, track.dcaZ());
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtHelium"), hePt, track.dcaXY());
+            histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtHelium"), hePt, track.dcaZ());
+          }
+        }
+        if (isAntiHeWTPCpid) {
+          histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
+          histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
+          if (track.hasTOF() && outFlagOptions.doTOFplots) {
+            histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
+            histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
+          }
+        }
+      }
+
+      if (passDCAxyzCut) {
+        // LOG(info)<<"\n collisionId ============>"<<track.collisionId();
+
+        // QA histos fill
+        histos.fill(HIST("qa/h1ITSncr"), track.itsNCls());
+        histos.fill(HIST("qa/h1TPCnfound"), track.tpcNClsFound());
+        histos.fill(HIST("qa/h1TPCncr"), track.tpcNClsCrossedRows());
+        histos.fill(HIST("qa/h1rTPC"), track.tpcCrossedRowsOverFindableCls());
+        histos.fill(HIST("qa/h1chi2ITS"), track.tpcChi2NCl());
+        histos.fill(HIST("qa/h1chi2TPC"), track.itsChi2NCl());
+
+        if (enableDebug) {
+          debugHistos.fill(HIST("debug/h2TPCsignVsTPCmomentum_AllTracks"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
+        }
+
+        if (enableDebug) {
+          debugHistos.fill(HIST("debug/tracks/h1Eta"), track.eta());
+          debugHistos.fill(HIST("debug/tracks/h1VarPhi"), track.phi());
+          debugHistos.fill(HIST("debug/tracks/h2EtaVsPhi"), track.eta(), track.phi());
+          debugHistos.fill(HIST("debug/tracks/h2PionYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Pion)), track.pt());
 
           if (track.sign() > 0) {
-            histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteron"), DPt, track.dcaXY());
-            histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteron"), DPt, track.dcaZ());
-          } else {
-            histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteron"), antiDPt, track.dcaXY());
-            histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteron"), antiDPt, track.dcaZ());
-          }
-        }
-      }
-      if (enableTr && trRapCut && makeDCAAfterCutPlots) {
-        if (isTriton) {
-          if (track.sign() > 0) {
-            histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtTriton"), track.pt(), track.dcaXY());
-            histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtTriton"), track.pt(), track.dcaZ());
-          } else {
-            histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtantiTriton"), track.pt(), track.dcaXY());
-            histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtantiTriton"), track.pt(), track.dcaZ());
-          }
-        }
-      }
-      if (enableHe && heRapCut && makeDCAAfterCutPlots) {
-        if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) {
-          if (track.sign() > 0) {
-            histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtHelium"), hePt, track.dcaXY());
-            histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtHelium"), hePt, track.dcaZ());
-            if (track.hasTOF() && doTOFplots) {
-              histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtHelium"), hePt, track.dcaXY());
-              histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtHelium"), hePt, track.dcaZ());
+            debugHistos.fill(HIST("debug/qa/h2TPCncrVsPtPos"), track.tpcInnerParam(), track.tpcNClsCrossedRows());
+            debugHistos.fill(HIST("debug/qa/h2TPCncrVsTPCsignalPos"), track.tpcSignal(), track.tpcNClsCrossedRows());
+
+            if (track.tpcInnerParam() < 0.5f) {
+              debugHistos.fill(HIST("debug/qa/h1TPCncrLowPPos"), track.tpcNClsCrossedRows());
+            }
+            if ((track.tpcInnerParam() >= 0.5f) && (track.tpcInnerParam() < 1.f)) {
+              debugHistos.fill(HIST("debug/qa/h1TPCncrMidPPos"), track.tpcNClsCrossedRows());
+            }
+            if (track.tpcInnerParam() >= 1.f) {
+              debugHistos.fill(HIST("debug/qa/h1TPCncrHighPPos"), track.tpcNClsCrossedRows());
             }
           } else {
-            histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
-            histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
-            if (track.hasTOF() && doTOFplots) {
-              histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHelium"), antihePt, track.dcaXY());
-              histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtantiHelium"), antihePt, track.dcaZ());
+            debugHistos.fill(HIST("debug/qa/h2TPCncrVsPtNeg"), track.tpcInnerParam(), track.tpcNClsCrossedRows());
+            debugHistos.fill(HIST("debug/qa/h2TPCncrVsTPCsignalNeg"), track.tpcSignal(), track.tpcNClsCrossedRows());
+
+            if (track.tpcInnerParam() < 0.5f) {
+              debugHistos.fill(HIST("debug/qa/h1TPCncrLowPNeg"), track.tpcNClsCrossedRows());
+            }
+            if ((track.tpcInnerParam() >= 0.5f) && (track.tpcInnerParam() < 1.f)) {
+              debugHistos.fill(HIST("debug/qa/h1TPCncrMidPNeg"), track.tpcNClsCrossedRows());
+            }
+            if (track.tpcInnerParam() >= 1.f) {
+              debugHistos.fill(HIST("debug/qa/h1TPCncrHighPNeg"), track.tpcNClsCrossedRows());
             }
           }
+
+          debugHistos.fill(HIST("debug/tracks/pion/h2PionVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPi());
+          debugHistos.fill(HIST("debug/tracks/kaon/h2KaonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaKa());
         }
-      }
-      if (enableAl && alRapCut && makeDCAAfterCutPlots) {
-        if (std::abs(track.tpcNSigmaAl()) < nsigmaTPCAl) {
-          if (track.sign() > 0) {
-            histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtAlpha"), track.pt(), track.dcaXY());
-            histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtAlpha"), track.pt(), track.dcaZ());
-          } else {
-            histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtantiAlpha"), track.pt(), track.dcaXY());
-            histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtantiAlpha"), track.pt(), track.dcaZ());
+
+        if (enablePtSpectra)
+          histos.fill(HIST("tracks/eff/h2pVsTPCmomentum"), track.tpcInnerParam(), track.p());
+
+        if (filterOptions.enableFiltering) {
+          if (track.tpcNSigmaKa() < 5)
+            continue;
+        }
+
+        if (enablePIDplot)
+          histos.fill(HIST("tracks/h2TPCsignVsTPCmomentum"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
+
+        if constexpr (!IsFilteredData) {
+          if (nsigmaITSvar.showAverageClusterSize && enablePIDplot) {
+            histos.fill(HIST("tracks/averageClusterSize"), track.p(), averageClusterSizeTrk(track));
+            histos.fill(HIST("tracks/averageClusterSizePerCoslInv"), track.p(), averageClusterSizePerCoslInv(track));
           }
         }
-      }
-
-      // LOG(info)<<"\n collisionId ============>"<<track.collisionId();
-
-      // QA histos fill
-      histos.fill(HIST("qa/h1ITSncr"), track.itsNCls());
-      histos.fill(HIST("qa/h1TPCnfound"), track.tpcNClsFound());
-      histos.fill(HIST("qa/h1TPCncr"), track.tpcNClsCrossedRows());
-      histos.fill(HIST("qa/h1rTPC"), track.tpcCrossedRowsOverFindableCls());
-      histos.fill(HIST("qa/h1chi2ITS"), track.tpcChi2NCl());
-      histos.fill(HIST("qa/h1chi2TPC"), track.itsChi2NCl());
-
-      if (enableDebug) {
-        debugHistos.fill(HIST("debug/h2TPCsignVsTPCmomentum_AllTracks"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
-      }
-
-      if (enableDebug) {
-        debugHistos.fill(HIST("debug/tracks/h1Eta"), track.eta());
-        debugHistos.fill(HIST("debug/tracks/h1VarPhi"), track.phi());
-        debugHistos.fill(HIST("debug/tracks/h2EtaVsPhi"), track.eta(), track.phi());
 
         if (track.sign() > 0) {
-          debugHistos.fill(HIST("debug/qa/h2TPCncrVsPtPos"), track.tpcInnerParam(), track.tpcNClsCrossedRows());
-          debugHistos.fill(HIST("debug/qa/h2TPCncrVsTPCsignalPos"), track.tpcSignal(), track.tpcNClsCrossedRows());
+          if (enablePr && prRapCut) {
+            if (outFlagOptions.enableExpSignalTPC)
+              histos.fill(HIST("tracks/proton/h2ProtonTPCExpSignalDiffVsPt"), track.pt(), track.tpcExpSignalDiffPr());
 
-          if (track.tpcInnerParam() < 0.5f) {
-            debugHistos.fill(HIST("debug/qa/h1TPCncrLowPPos"), track.tpcNClsCrossedRows());
+            switch (useHasTRDConfig) {
+              case 0:
+                histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
+                break;
+              case 1:
+                if (track.hasTRD()) {
+                  histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
+                }
+                break;
+              case 2:
+                if (!track.hasTRD()) {
+                  histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
+                }
+                break;
+            }
           }
-          if ((track.tpcInnerParam() >= 0.5f) && (track.tpcInnerParam() < 1.f)) {
-            debugHistos.fill(HIST("debug/qa/h1TPCncrMidPPos"), track.tpcNClsCrossedRows());
+          if (enableTr && trRapCut) {
+            histos.fill(HIST("tracks/triton/h2TritonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaTr());
           }
-          if (track.tpcInnerParam() >= 1.f) {
-            debugHistos.fill(HIST("debug/qa/h1TPCncrHighPPos"), track.tpcNClsCrossedRows());
+          if (enableAl && alRapCut) {
+            histos.fill(HIST("tracks/alpha/h2AlphaVspTNSigmaTPC"), track.pt(), track.tpcNSigmaAl());
           }
         } else {
-          debugHistos.fill(HIST("debug/qa/h2TPCncrVsPtNeg"), track.tpcInnerParam(), track.tpcNClsCrossedRows());
-          debugHistos.fill(HIST("debug/qa/h2TPCncrVsTPCsignalNeg"), track.tpcSignal(), track.tpcNClsCrossedRows());
-
-          if (track.tpcInnerParam() < 0.5f) {
-            debugHistos.fill(HIST("debug/qa/h1TPCncrLowPNeg"), track.tpcNClsCrossedRows());
+          if (enablePr && prRapCut) {
+            if (outFlagOptions.enableExpSignalTPC)
+              histos.fill(HIST("tracks/proton/h2antiProtonTPCExpSignalDiffVsPt"), track.pt(), track.tpcExpSignalDiffPr());
+            switch (useHasTRDConfig) {
+              case 0:
+                histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
+                break;
+              case 1:
+                if (track.hasTRD()) {
+                  histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
+                }
+                break;
+              case 2:
+                if (!track.hasTRD()) {
+                  histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
+                }
+                break;
+            }
           }
-          if ((track.tpcInnerParam() >= 0.5f) && (track.tpcInnerParam() < 1.f)) {
-            debugHistos.fill(HIST("debug/qa/h1TPCncrMidPNeg"), track.tpcNClsCrossedRows());
+          if (enableTr && trRapCut) {
+            histos.fill(HIST("tracks/triton/h2antiTritonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaTr());
           }
-          if (track.tpcInnerParam() >= 1.f) {
-            debugHistos.fill(HIST("debug/qa/h1TPCncrHighPNeg"), track.tpcNClsCrossedRows());
+          if (enableAl && alRapCut) {
+            histos.fill(HIST("tracks/alpha/h2antiAlphaVspTNSigmaTPC"), track.pt(), track.tpcNSigmaAl());
           }
         }
 
-        debugHistos.fill(HIST("debug/tracks/pion/h2PionVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPi());
-        debugHistos.fill(HIST("debug/tracks/kaon/h2KaonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaKa());
+        //  TOF
+        if (outFlagOptions.doTOFplots) {
+          if (enableDebug) {
+            histos.fill(HIST("tracks/pion/h2PionVspTNSigmaTOF"), track.pt(), track.tofNSigmaPi());
+            histos.fill(HIST("tracks/kaon/h2KaonVspTNSigmaTOF"), track.pt(), track.tofNSigmaKa());
+          }
+          if (track.sign() > 0) {
+            if (enablePr && prRapCut) {
+
+              switch (useHasTRDConfig) {
+                case 0:
+                  histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                  break;
+                case 1:
+                  if (track.hasTRD()) {
+                    histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                  }
+                  break;
+                case 2:
+                  if (!track.hasTRD()) {
+                    histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                  }
+                  break;
+              }
+              if (outFlagOptions.enableExpSignalTOF)
+                histos.fill(HIST("tracks/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+            }
+
+            if (filterOptions.enableEvTimeSplitting && track.hasTOF()) {
+              if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
+                }
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
+                if (enableDebug && (track.beta() > betaCut)) {
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
+
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
+                  }
+                }
+
+              } else if (track.isEvTimeT0AC()) {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
+                }
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
+                if (enableDebug && (track.beta() > betaCut)) {
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/ft0/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
+                  }
+                }
+
+              } else if (track.isEvTimeTOF()) {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
+                }
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
+                if (enableDebug && (track.beta() > betaCut)) {
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/tof/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
+
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/tof/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
+
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/tof/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
+                  }
+                }
+
+              } else {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
+                }
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
+                if (enableDebug && (track.beta() > betaCut)) {
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/fill/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
+
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/fill/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
+
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/fill/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
+                  }
+                }
+              }
+            }
+          } else {
+            if (enablePr && prRapCut) {
+              switch (useHasTRDConfig) {
+                case 0:
+                  histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                  break;
+                case 1:
+                  if (track.hasTRD()) {
+                    histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                  }
+                  break;
+                case 2:
+                  if (!track.hasTRD()) {
+                    histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                  }
+                  break;
+              }
+              if (outFlagOptions.enableExpSignalTOF)
+                histos.fill(HIST("tracks/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+            }
+            if (filterOptions.enableEvTimeSplitting && track.hasTOF()) {
+              if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+                }
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h3antiDeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), antiDPt);
+                if (enableDebug && (track.beta() > betaCut)) {
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
+
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
+                  }
+                }
+
+              } else if (track.isEvTimeT0AC()) {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
+
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/ft0/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
+                  }
+                }
+
+              } else if (track.isEvTimeTOF()) {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
+
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
+
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/tof/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
+                  }
+                }
+
+              } else {
+                if (enablePr)
+                  evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
+                if (enableDe)
+                  evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
+                if (outFlagOptions.enableExpSignalTOF) {
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
+                  if (enableDe)
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+                  if (enablePr)
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
+
+                  if (enablePr)
+                    debugHistos.fill(HIST("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
+                  if (enableDe)
+                    debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
+
+                  if (outFlagOptions.enableExpSignalTOF) {
+                    if (enablePr)
+                      debugHistos.fill(HIST("debug/evtime/fill/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
+                    if (enableDe)
+                      debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
+                  }
+                }
+              }
+            }
+          }
+        }
       }
 
-      if (enablePtSpectra)
-        histos.fill(HIST("tracks/eff/h2pVsTPCmomentum"), track.tpcInnerParam(), track.p());
+      if (isDeWoTPCpid) {
+        if (outFlagOptions.enableExpSignalTPC)
+          histos.fill(HIST("tracks/deuteron/h2DeuteronTPCExpSignalDiffVsPt"), DPt, track.tpcExpSignalDiffDe());
 
-      if (enableFiltering) {
-        if (track.tpcNSigmaKa() < 5)
-          continue;
+        switch (useHasTRDConfig) {
+          case 0:
+            if (enableCentrality)
+              histos.fill(HIST("tracks/deuteron/h3DeuteronVspTNSigmaTPCVsMult"), DPt, track.tpcNSigmaDe(), event.centFT0M());
+            else
+              histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPC"), DPt, track.tpcNSigmaDe());
+            break;
+          case 1:
+            if (track.hasTRD()) {
+              histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPC"), DPt, track.tpcNSigmaDe());
+            }
+            break;
+          case 2:
+            if (!track.hasTRD()) {
+              histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPC"), DPt, track.tpcNSigmaDe());
+            }
+            break;
+        }
+      }
+      if (isAntiDeWoTPCpid) {
+        if (outFlagOptions.enableExpSignalTPC)
+          histos.fill(HIST("tracks/deuteron/h2antiDeuteronTPCExpSignalDiffVsPt"), antiDPt, track.tpcExpSignalDiffDe());
+
+        switch (useHasTRDConfig) {
+          case 0:
+            if (enableCentrality)
+              histos.fill(HIST("tracks/deuteron/h3antiDeuteronVspTNSigmaTPCVsMult"), antiDPt, track.tpcNSigmaDe(), event.centFT0M());
+            else
+              histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC"), antiDPt, track.tpcNSigmaDe());
+            break;
+          case 1:
+            if (track.hasTRD()) {
+              histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC"), antiDPt, track.tpcNSigmaDe());
+            }
+            break;
+          case 2:
+            if (!track.hasTRD()) {
+              histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC"), antiDPt, track.tpcNSigmaDe());
+            }
+            break;
+        }
       }
 
-      // p,d,t,He
-      histos.fill(HIST("tracks/h2TPCsignVsTPCmomentum"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
-
-      if (track.sign() > 0) {
-        if (enablePr && prRapCut) {
-          if (enableExpSignalTPC)
-            histos.fill(HIST("tracks/proton/h2ProtonTPCExpSignalDiffVsPt"), track.pt(), track.tpcExpSignalDiffPr());
-
-          switch (useHasTRDConfig) {
-            case 0:
-              histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
-              break;
-            case 1:
-              if (track.hasTRD()) {
-                histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
-              }
-              break;
-            case 2:
-              if (!track.hasTRD()) {
-                histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
-              }
-              break;
+      if (isHeWoTPCpid) {
+        if (outFlagOptions.enableExpSignalTPC)
+          histos.fill(HIST("tracks/helium/h2HeliumTPCExpSignalDiffVsPt"), hePt, track.tpcExpSignalDiffHe());
+        histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaITSTr"), track.p(), nITSTr);
+        histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaITSHe"), track.p(), nITSHe);
+        histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaTPC"), hePt, track.tpcNSigmaHe());
+      }
+      if (isAntiHeWoTPCpid) {
+        if (outFlagOptions.enableExpSignalTPC)
+          histos.fill(HIST("tracks/helium/h2antiHeliumTPCExpSignalDiffVsPt"), antihePt, track.tpcExpSignalDiffHe());
+        histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaITSTr"), track.p(), nITSTr);
+        histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaITSHe"), track.p(), nITSHe);
+        histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaTPC"), antihePt, track.tpcNSigmaHe());
+      }
+      if (isHeWTPCpid) {
+        histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaITSTr_wTPCpid"), track.p(), nITSTr);
+        histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaITSHe_wTPCpid"), track.p(), nITSHe);
+      }
+      if (isAntiHeWTPCpid) {
+        histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaITSTr_wTPCpid"), track.p(), nITSTr);
+        histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaITSHe_wTPCpid"), track.p(), nITSHe);
+      }
+      if constexpr (!IsFilteredData) {
+        if (isHeWTPCpid || isAntiHeWTPCpid) {
+          if (nsigmaITSvar.showAverageClusterSize) {
+            histos.fill(HIST("tracks/helium/averageClusterSize"), track.p(), averageClusterSizeTrk(track));
+            histos.fill(HIST("tracks/helium/averageClusterSizePerCoslInv"), track.p(), averageClusterSizePerCoslInv(track));
           }
-        }
-        if (enableDe && deRapCut) {
-          if (enableExpSignalTPC)
-            histos.fill(HIST("tracks/deuteron/h2DeuteronTPCExpSignalDiffVsPt"), DPt, track.tpcExpSignalDiffDe());
-
-          switch (useHasTRDConfig) {
-            case 0:
-              if (enableCentrality)
-                histos.fill(HIST("tracks/deuteron/h3DeuteronVspTNSigmaTPCVsMult"), DPt, track.tpcNSigmaDe(), event.centFT0M());
-              else
-                histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPC"), DPt, track.tpcNSigmaDe());
-              break;
-            case 1:
-              if (track.hasTRD()) {
-                histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPC"), DPt, track.tpcNSigmaDe());
-              }
-              break;
-            case 2:
-              if (!track.hasTRD()) {
-                histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPC"), DPt, track.tpcNSigmaDe());
-              }
-              break;
-          }
-        }
-        if (enableTr && trRapCut) {
-
-          histos.fill(HIST("tracks/triton/h2TritonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaTr());
-        }
-        if (enableHe && heRapCut) {
-          if (enableExpSignalTPC)
-            histos.fill(HIST("tracks/helium/h2HeliumTPCExpSignalDiffVsPt"), hePt, track.tpcExpSignalDiffHe());
-
-          histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaTPC"), hePt, track.tpcNSigmaHe());
-        }
-        if (enableAl && alRapCut) {
-          histos.fill(HIST("tracks/alpha/h2AlphaVspTNSigmaTPC"), track.pt(), track.tpcNSigmaAl());
-        }
-      } else {
-        if (enablePr && prRapCut) {
-          if (enableExpSignalTPC)
-            histos.fill(HIST("tracks/proton/h2antiProtonTPCExpSignalDiffVsPt"), track.pt(), track.tpcExpSignalDiffPr());
-
-          switch (useHasTRDConfig) {
-            case 0:
-              histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
-              break;
-            case 1:
-              if (track.hasTRD()) {
-                histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
-              }
-              break;
-            case 2:
-              if (!track.hasTRD()) {
-                histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaPr());
-              }
-              break;
-          }
-        }
-        if (enableDe && deRapCut) {
-          if (enableExpSignalTPC)
-            histos.fill(HIST("tracks/deuteron/h2antiDeuteronTPCExpSignalDiffVsPt"), antiDPt, track.tpcExpSignalDiffDe());
-
-          switch (useHasTRDConfig) {
-            case 0:
-              if (enableCentrality)
-                histos.fill(HIST("tracks/deuteron/h3antiDeuteronVspTNSigmaTPCVsMult"), antiDPt, track.tpcNSigmaDe(), event.centFT0M());
-              else
-                histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC"), antiDPt, track.tpcNSigmaDe());
-              break;
-            case 1:
-              if (track.hasTRD()) {
-                histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC"), antiDPt, track.tpcNSigmaDe());
-              }
-              break;
-            case 2:
-              if (!track.hasTRD()) {
-                histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPC"), antiDPt, track.tpcNSigmaDe());
-              }
-              break;
-          }
-        }
-        if (enableTr && trRapCut) {
-          histos.fill(HIST("tracks/triton/h2antiTritonVspTNSigmaTPC"), track.pt(), track.tpcNSigmaTr());
-        }
-        if (enableHe && heRapCut) {
-          if (enableExpSignalTPC)
-            histos.fill(HIST("tracks/helium/h2antiHeliumTPCExpSignalDiffVsPt"), antihePt, track.tpcExpSignalDiffHe());
-
-          histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaTPC"), antihePt, track.tpcNSigmaHe());
-        }
-        if (enableAl && alRapCut) {
-          histos.fill(HIST("tracks/alpha/h2antiAlphaVspTNSigmaTPC"), track.pt(), track.tpcNSigmaAl());
         }
       }
 
       //  TOF
-      if (doTOFplots) {
-        histos.fill(HIST("tracks/pion/h2PionVspTNSigmaTOF"), track.pt(), track.tofNSigmaPi());
-        histos.fill(HIST("tracks/kaon/h2KaonVspTNSigmaTOF"), track.pt(), track.tofNSigmaKa());
-        if (track.sign() > 0) {
-          if (enablePr && prRapCut) {
+      if (outFlagOptions.doTOFplots) {
 
-            switch (useHasTRDConfig) {
-              case 0:
-                histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-                break;
-              case 1:
-                if (track.hasTRD()) {
-                  histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-                }
-                break;
-              case 2:
-                if (!track.hasTRD()) {
-                  histos.fill(HIST("tracks/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-                }
-                break;
-            }
-            if (enableExpSignalTOF)
-              histos.fill(HIST("tracks/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-          }
-          if (enableDe && deRapCut) {
-            switch (useHasTRDConfig) {
-              case 0:
+        if (isDeWoTPCpid) {
+          switch (useHasTRDConfig) {
+            case 0:
+              histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
+              break;
+            case 1:
+              if (track.hasTRD()) {
                 histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-                break;
-              case 1:
-                if (track.hasTRD()) {
-                  histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-                }
-                break;
-              case 2:
-                if (!track.hasTRD()) {
-                  histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-                }
-                break;
-            }
-            if (enableExpSignalTOF)
-              histos.fill(HIST("tracks/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
+              }
+              break;
+            case 2:
+              if (!track.hasTRD()) {
+                histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
+              }
+              break;
           }
-          if (enableHe && heRapCut) {
-            histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaTOF"), hePt, track.tofNSigmaHe());
-            if (enableExpSignalTOF)
-              histos.fill(HIST("tracks/helium/h2HeliumTOFExpSignalDiffVsPt"), hePt, track.tofExpSignalDiffHe());
-          }
-          if (enableEvTimeSplitting && track.hasTOF()) {
-            if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
-              }
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), track.pt());
-              if (enableDebug && (track.beta() > betaCut)) {
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
+        }
 
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
-                if (enableExpSignalTOF) {
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
-                }
-              }
-
-            } else if (track.isEvTimeT0AC()) {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
-              }
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
-              if (enableDebug && (track.beta() > betaCut)) {
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
-
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/ft0/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
-                }
-              }
-
-            } else if (track.isEvTimeTOF()) {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
-              }
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
-              if (enableDebug && (track.beta() > betaCut)) {
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/tof/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
-
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/tof/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
-
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/tof/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
-                }
-              }
-
-            } else {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2ProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF"), DPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2ProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2DeuteronTOFExpSignalDiffVsPt"), DPt, track.tofExpSignalDiffDe());
-              }
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
-              if (enableDebug && (track.beta() > betaCut)) {
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/fill/proton/h2ProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTPC_BetaCut"), DPt, track.tpcNSigmaDe());
-
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/fill/proton/h2ProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2DeuteronVspTNSigmaTOF_BetaCut"), DPt, track.tofNSigmaDe());
-
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/fill/proton/h2ProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2DeuteronTOFExpSignalDiffVsPt_BetaCut"), DPt, track.tofExpSignalDiffDe());
-                }
-              }
-            }
-          }
-
-        } else {
-          if (enablePr && prRapCut) {
-            switch (useHasTRDConfig) {
-              case 0:
-                histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-                break;
-              case 1:
-                if (track.hasTRD()) {
-                  histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-                }
-                break;
-              case 2:
-                if (!track.hasTRD()) {
-                  histos.fill(HIST("tracks/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-                }
-                break;
-            }
-            if (enableExpSignalTOF)
-              histos.fill(HIST("tracks/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-          }
-          if (enableDe && deRapCut) {
-            switch (useHasTRDConfig) {
-              case 0:
+        if (isAntiDeWoTPCpid) {
+          switch (useHasTRDConfig) {
+            case 0:
+              histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
+              break;
+            case 1:
+              if (track.hasTRD()) {
                 histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-                break;
-              case 1:
-                if (track.hasTRD()) {
-                  histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-                }
-                break;
-              case 2:
-                if (!track.hasTRD()) {
-                  histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-                }
-                break;
-            }
-            if (enableExpSignalTOF)
-              histos.fill(HIST("tracks/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+              }
+              break;
+            case 2:
+              if (!track.hasTRD()) {
+                histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
+              }
+              break;
           }
-          if (enableHe && heRapCut) {
-            histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaTOF"), antihePt, track.tofNSigmaHe());
-            if (enableExpSignalTOF)
-              histos.fill(HIST("tracks/helium/h2antiHeliumTOFExpSignalDiffVsPt"), antihePt, track.tofExpSignalDiffHe());
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+        }
+
+        if (isHeWoTPCpid) {
+          histos.fill(HIST("tracks/helium/h2HeliumVspTNSigmaTOF"), hePt, track.tofNSigmaHe());
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/helium/h2HeliumTOFExpSignalDiffVsPt"), hePt, track.tofExpSignalDiffHe());
+        }
+
+        if (isAntiHeWoTPCpid) {
+          histos.fill(HIST("tracks/helium/h2antiHeliumVspTNSigmaTOF"), antihePt, track.tofNSigmaHe());
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/helium/h2antiHeliumTOFExpSignalDiffVsPt"), antihePt, track.tofExpSignalDiffHe());
+        }
+      }
+
+      if (passDCAxyzCut) {
+        // PID
+        if (enablePtSpectra && enableDebug) {
+          if (track.sign() > 0) {
+            debugHistos.fill(HIST("tracks/eff/hPtP"), track.pt());
+            debugHistos.fill(HIST("tracks/eff/hPtPrebinned"), track.pt());
+          } else {
+            debugHistos.fill(HIST("tracks/eff/hPtantiP"), track.pt());
+            debugHistos.fill(HIST("tracks/eff/hPtantiPrebinned"), track.pt());
           }
-          if (enableEvTimeSplitting && track.hasTOF()) {
-            if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
+        }
+
+        if (enablePr) {
+          if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr && prRapCut) {
+            if (track.sign() > 0) {
+              if (enablePtSpectra) {
+                histos.fill(HIST("tracks/eff/proton/hPtPr"), track.pt());
+                histos.fill(HIST("tracks/eff/proton/hPtPrrebinned"), track.pt());
+                histos.fill(HIST("tracks/eff/proton/h2pVsTPCmomentumPr"), track.tpcInnerParam(), track.p());
               }
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h3antiDeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), antiDPt);
-              if (enableDebug && (track.beta() > betaCut)) {
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
+              histos.fill(HIST("tracks/proton/h1ProtonSpectra"), track.pt());
+              histos.fill(HIST("tracks/proton/h2ProtonYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)), track.pt());
+              histos.fill(HIST("tracks/proton/h2ProtonEtavsPt"), track.eta(), track.pt());
 
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/ft0tof/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/ft0tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
-                }
-              }
-
-            } else if (track.isEvTimeT0AC()) {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/ft0/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
-
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/ft0/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/ft0/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
-                }
-              }
-
-            } else if (track.isEvTimeTOF()) {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
-
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/tof/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
-
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/tof/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/tof/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
-                }
-              }
-
+              if (enablePIDplot)
+                histos.fill(HIST("tracks/proton/h2TPCsignVsTPCmomentumProton"), track.tpcInnerParam(), track.tpcSignal());
             } else {
-              if (enablePr)
-                evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2antiProtonVspTNSigmaTOF"), track.pt(), track.tofNSigmaPr());
-              if (enableDe)
-                evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF"), antiDPt, track.tofNSigmaDe());
-              if (enableExpSignalTOF) {
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2antiProtonTOFExpSignalDiffVsPt"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableDe)
-                  evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt"), antiDPt, track.tofExpSignalDiffDe());
-                if (enablePr)
-                  evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTPC_BetaCut"), track.pt(), track.tpcNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTPC_BetaCut"), antiDPt, track.tpcNSigmaDe());
-
-                if (enablePr)
-                  debugHistos.fill(HIST("debug/evtime/fill/proton/h2antiProtonVspTNSigmaTOF_BetaCut"), track.pt(), track.tofNSigmaPr());
-                if (enableDe)
-                  debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2antiDeuteronVspTNSigmaTOF_BetaCut"), antiDPt, track.tofNSigmaDe());
-
-                if (enableExpSignalTOF) {
-                  if (enablePr)
-                    debugHistos.fill(HIST("debug/evtime/fill/proton/h2antiProtonTOFExpSignalDiffVsPt_BetaCut"), track.pt(), track.tofExpSignalDiffPr());
-                  if (enableDe)
-                    debugHistos.fill(HIST("debug/evtime/fill/deuteron/h2antiDeuteronTOFExpSignalDiffVsPt_BetaCut"), antiDPt, track.tofExpSignalDiffDe());
-                }
+              if (enablePtSpectra) {
+                histos.fill(HIST("tracks/eff/proton/hPtantiPr"), track.pt());
+                histos.fill(HIST("tracks/eff/proton/hPtantiPrrebinned"), track.pt());
+                histos.fill(HIST("tracks/eff/proton/h2pVsTPCmomentumantiPr"), track.tpcInnerParam(), track.p());
               }
+              histos.fill(HIST("tracks/proton/h1antiProtonSpectra"), track.pt());
+              histos.fill(HIST("tracks/proton/h2antiProtonYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)), track.pt());
+              histos.fill(HIST("tracks/proton/h2antiProtonEtavsPt"), track.eta(), track.pt());
+
+              if (enablePIDplot)
+                histos.fill(HIST("tracks/proton/h2TPCsignVsTPCmomentumantiProton"), track.tpcInnerParam(), track.tpcSignal());
             }
           }
         }
-      }
-
-      // PID
-      if (enablePtSpectra && enableDebug) {
-        if (track.sign() > 0) {
-          debugHistos.fill(HIST("tracks/eff/hPtP"), track.pt());
-          debugHistos.fill(HIST("tracks/eff/hPtPrebinned"), track.pt());
-        } else {
-          debugHistos.fill(HIST("tracks/eff/hPtantiP"), track.pt());
-          debugHistos.fill(HIST("tracks/eff/hPtantiPrebinned"), track.pt());
-        }
-      }
-
-      if (enablePr) {
-        if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr && prRapCut) {
-          if (track.sign() > 0) {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/proton/hPtPr"), track.pt());
-              histos.fill(HIST("tracks/eff/proton/hPtPrrebinned"), track.pt());
-              histos.fill(HIST("tracks/eff/proton/h2pVsTPCmomentumPr"), track.tpcInnerParam(), track.p());
+        if (enableTr) {
+          if ((isTritonTPCpid) && trRapCut) {
+            if (track.sign() > 0) {
+              if (enablePtSpectra) {
+                histos.fill(HIST("tracks/eff/triton/hPtTr"), track.pt());
+                histos.fill(HIST("tracks/eff/triton/h2pVsTPCmomentumTr"), track.tpcInnerParam(), track.p());
+              }
+              histos.fill(HIST("tracks/triton/h1TritonSpectra"), track.pt());
+              if (enablePIDplot)
+                histos.fill(HIST("tracks/triton/h2TPCsignVsTPCmomentumTriton"), track.tpcInnerParam(), track.tpcSignal());
+            } else {
+              if (enablePtSpectra) {
+                histos.fill(HIST("tracks/eff/triton/hPtantiTr"), track.pt());
+                histos.fill(HIST("tracks/eff/triton/h2pVsTPCmomentumantiTr"), track.tpcInnerParam(), track.p());
+              }
+              histos.fill(HIST("tracks/triton/h1antiTritonSpectra"), track.pt());
+              if (enablePIDplot)
+                histos.fill(HIST("tracks/triton/h2TPCsignVsTPCmomentumantiTriton"), track.tpcInnerParam(), track.tpcSignal());
             }
-            histos.fill(HIST("tracks/proton/h1ProtonSpectra"), track.pt());
-            histos.fill(HIST("tracks/proton/h2ProtonYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)), track.pt());
-            histos.fill(HIST("tracks/proton/h2ProtonEtavsPt"), track.eta(), track.pt());
-
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/proton/h2TPCsignVsTPCmomentumProton"), track.tpcInnerParam(), track.tpcSignal());
-          } else {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/proton/hPtantiPr"), track.pt());
-              histos.fill(HIST("tracks/eff/proton/hPtantiPrrebinned"), track.pt());
-              histos.fill(HIST("tracks/eff/proton/h2pVsTPCmomentumantiPr"), track.tpcInnerParam(), track.p());
-            }
-            histos.fill(HIST("tracks/proton/h1antiProtonSpectra"), track.pt());
-            histos.fill(HIST("tracks/proton/h2antiProtonYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Proton)), track.pt());
-            histos.fill(HIST("tracks/proton/h2antiProtonEtavsPt"), track.eta(), track.pt());
-
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/proton/h2TPCsignVsTPCmomentumantiProton"), track.tpcInnerParam(), track.tpcSignal());
           }
         }
-      }
-
-      if (enableDe) {
-        if ((std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) && deRapCut) {
-          if (track.sign() > 0) {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/deuteron/hPtDe"), DPt);
-              histos.fill(HIST("tracks/eff/deuteron/h2pVsTPCmomentumDe"), track.tpcInnerParam(), track.p());
+        if (enableAl) {
+          if ((std::abs(track.tpcNSigmaAl()) < nsigmaTPCvar.nsigmaTPCAl) && alRapCut) {
+            if (track.sign() > 0) {
+              histos.fill(HIST("tracks/alpha/h1AlphaSpectra"), track.pt());
+              if (enablePIDplot)
+                histos.fill(HIST("tracks/alpha/h2TPCsignVsTPCmomentumAlpha"), track.tpcInnerParam(), track.tpcSignal());
+            } else {
+              histos.fill(HIST("tracks/alpha/h1antiAlphaSpectra"), track.pt());
+              if (enablePIDplot)
+                histos.fill(HIST("tracks/alpha/h2TPCsignVsTPCmomentumantiAlpha"), track.tpcInnerParam(), track.tpcSignal());
             }
-            histos.fill(HIST("tracks/deuteron/h1DeuteronSpectra"), DPt);
-            histos.fill(HIST("tracks/deuteron/h2DeuteronYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)), DPt);
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/deuteron/h2TPCsignVsTPCmomentumDeuteron"), track.tpcInnerParam(), track.tpcSignal());
-          } else {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/deuteron/hPtantiDe"), antiDPt);
-              histos.fill(HIST("tracks/eff/deuteron/h2pVsTPCmomentumantiDe"), track.tpcInnerParam(), track.p());
-            }
-            histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectra"), antiDPt);
-            histos.fill(HIST("tracks/deuteron/h2antiDeuteronYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)), antiDPt);
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/deuteron/h2TPCsignVsTPCmomentumantiDeuteron"), track.tpcInnerParam(), track.tpcSignal());
           }
         }
-      }
 
-      if (enableTr) {
-        if ((isTriton) && trRapCut) {
-          if (track.sign() > 0) {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/triton/hPtTr"), track.pt());
-              histos.fill(HIST("tracks/eff/triton/h2pVsTPCmomentumTr"), track.tpcInnerParam(), track.p());
-            }
-            histos.fill(HIST("tracks/triton/h1TritonSpectra"), track.pt());
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/triton/h2TPCsignVsTPCmomentumTriton"), track.tpcInnerParam(), track.tpcSignal());
-          } else {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/triton/hPtantiTr"), track.pt());
-              histos.fill(HIST("tracks/eff/triton/h2pVsTPCmomentumantiTr"), track.tpcInnerParam(), track.p());
-            }
-            histos.fill(HIST("tracks/triton/h1antiTritonSpectra"), track.pt());
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/triton/h2TPCsignVsTPCmomentumantiTriton"), track.tpcInnerParam(), track.tpcSignal());
-          }
-        }
-      }
-      if (enableHe) {
-        if ((std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) && heRapCut) {
-          if (track.sign() > 0) {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/helium/hPtHe"), hePt);
-              histos.fill(HIST("tracks/eff/helium/h2pVsTPCmomentumHe"), heTPCmomentum, heP);
-            }
-            histos.fill(HIST("tracks/helium/h1HeliumSpectra"), hePt);
-            histos.fill(HIST("tracks/helium/h1HeliumSpectra_Z2"), 2 * hePt);
-            histos.fill(HIST("tracks/helium/h2HeliumYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), hePt);
-            histos.fill(HIST("tracks/helium/h2HeliumYvsPt_Z2"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), 2 * hePt);
-            histos.fill(HIST("tracks/helium/h2HeliumEtavsPt"), track.eta(), hePt);
-            histos.fill(HIST("tracks/helium/h2HeliumEtavsPt_Z2"), track.eta(), 2 * hePt);
-
-            // if (enablePIDplot)
-            //   histos.fill(HIST("tracks/helium/h2TPCsignVsTPCmomentumHelium"), heTPCmomentum, track.tpcSignal());
-
-          } else {
-            if (enablePtSpectra) {
-              histos.fill(HIST("tracks/eff/helium/hPtantiHe"), antihePt);
-              histos.fill(HIST("tracks/eff/helium/h2pVsTPCmomentumantiHe"), antiheTPCmomentum, antiheP);
-            }
-            histos.fill(HIST("tracks/helium/h1antiHeliumSpectra"), antihePt);
-            histos.fill(HIST("tracks/helium/h1antiHeliumSpectra_Z2"), 2 * antihePt);
-            histos.fill(HIST("tracks/helium/h2antiHeliumYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), antihePt);
-            histos.fill(HIST("tracks/helium/h2antiHeliumYvsPt_Z2"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), 2 * antihePt);
-            histos.fill(HIST("tracks/helium/h2antiHeliumEtavsPt"), track.eta(), antihePt);
-            histos.fill(HIST("tracks/helium/h2antiHeliumEtavsPt_Z2"), track.eta(), 2 * antihePt);
-            //   if (enablePIDplot)
-            //     histos.fill(HIST("tracks/helium/h2TPCsignVsTPCmomentumantiHelium"), antiheTPCmomentum, track.tpcSignal());
-            // }
-          }
-        }
-      }
-      if (enableAl) {
-        if ((std::abs(track.tpcNSigmaAl()) < nsigmaTPCAl) && alRapCut) {
-          if (track.sign() > 0) {
-            histos.fill(HIST("tracks/alpha/h1AlphaSpectra"), track.pt());
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/alpha/h2TPCsignVsTPCmomentumAlpha"), track.tpcInnerParam(), track.tpcSignal());
-          } else {
-            histos.fill(HIST("tracks/alpha/h1antiAlphaSpectra"), track.pt());
-            if (enablePIDplot)
-              histos.fill(HIST("tracks/alpha/h2TPCsignVsTPCmomentumantiAlpha"), track.tpcInnerParam(), track.tpcSignal());
-          }
-        }
-      }
-
-      if (doTOFplots) {
-        if (track.hasTOF()) {
-
+        if (outFlagOptions.doTOFplots && track.hasTOF()) {
           if (enablePtSpectra && enableDebug) {
             if (track.sign() > 0) {
               debugHistos.fill(HIST("tracks/eff/hPtPTOF"), track.pt());
@@ -3101,36 +4386,38 @@ struct LFNucleiBATask {
             }
           }
 
-          if (enableBetaCut && (track.beta() > betaCut))
+          if (outFlagOptions.enableBetaCut && (track.beta() > betaCut) && enablePIDplot)
             histos.fill(HIST("tracks/h2TOFbetaVsP_BetaCut"), track.p() / (1.f * track.sign()), track.beta());
-          switch (useHasTRDConfig) {
-            case 0:
-              histos.fill(HIST("tracks/h2TOFbetaVsP"), track.p() / (1.f * track.sign()), track.beta());
-              break;
-            case 1:
-              if (track.hasTRD()) {
+          if (enablePIDplot) {
+            switch (useHasTRDConfig) {
+              case 0:
                 histos.fill(HIST("tracks/h2TOFbetaVsP"), track.p() / (1.f * track.sign()), track.beta());
-              }
-              break;
-            case 2:
-              if (!track.hasTRD()) {
-                histos.fill(HIST("tracks/h2TOFbetaVsP"), track.p() / (1.f * track.sign()), track.beta());
-              }
-              break;
+                break;
+              case 1:
+                if (track.hasTRD()) {
+                  histos.fill(HIST("tracks/h2TOFbetaVsP"), track.p() / (1.f * track.sign()), track.beta());
+                }
+                break;
+              case 2:
+                if (!track.hasTRD()) {
+                  histos.fill(HIST("tracks/h2TOFbetaVsP"), track.p() / (1.f * track.sign()), track.beta());
+                }
+                break;
+            }
           }
 
           if (enablePtSpectra)
             histos.fill(HIST("tracks/eff/h2TPCmomentumVsTOFExpMomentum"), track.tofExpMom(), track.tpcInnerParam());
 
           if (enablePr && prRapCut) {
-            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr && track.sign() > 0) {
+            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr && track.sign() > 0) {
               histos.fill(HIST("tracks/proton/h2ProtonTOFbetaVsP"), track.p(), track.beta());
               if (enablePtSpectra) {
                 histos.fill(HIST("tracks/eff/proton/h2pVsTOFExpMomentumPr"), track.tofExpMom(), track.p());
                 histos.fill(HIST("tracks/eff/proton/h2TPCmomentumVsTOFExpMomentumPr"), track.tofExpMom(), track.tpcInnerParam());
               }
             }
-            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr && track.sign() < 0) {
+            if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr && track.sign() < 0) {
               histos.fill(HIST("tracks/proton/h2antiProtonTOFbetaVsP"), track.p(), track.beta());
               if (enablePtSpectra) {
                 histos.fill(HIST("tracks/eff/proton/h2pVsTOFExpMomentumantiPr"), track.tofExpMom(), track.p());
@@ -3138,31 +4425,15 @@ struct LFNucleiBATask {
               }
             }
           }
-          if (enableDe && deRapCut) {
-            if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe && track.sign() > 0) {
-              histos.fill(HIST("tracks/deuteron/h2DeuteronTOFbetaVsP"), track.p(), track.beta());
-              if (enablePtSpectra) {
-                histos.fill(HIST("tracks/eff/deuteron/h2pVsTOFExpMomentumDe"), track.tofExpMom(), track.p());
-                histos.fill(HIST("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumDe"), track.tofExpMom(), track.tpcInnerParam());
-              }
-            }
-            if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe && track.sign() < 0) {
-              histos.fill(HIST("tracks/deuteron/h2antiDeuteronTOFbetaVsP"), track.p(), track.beta());
-              if (enablePtSpectra) {
-                histos.fill(HIST("tracks/eff/deuteron/h2pVsTOFExpMomentumantiDe"), track.tofExpMom(), track.p());
-                histos.fill(HIST("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumantiDe"), track.tofExpMom(), track.tpcInnerParam());
-              }
-            }
-          }
           if (enableTr && trRapCut) {
-            if (isTriton && track.sign() > 0) {
+            if (isTritonTPCpid && track.sign() > 0) {
               histos.fill(HIST("tracks/triton/h2TritonTOFbetaVsP"), track.p(), track.beta());
               if (enablePtSpectra) {
                 histos.fill(HIST("tracks/eff/triton/h2pVsTOFExpMomentumTr"), track.tofExpMom(), track.p());
                 histos.fill(HIST("tracks/eff/triton/h2TPCmomentumVsTOFExpMomentumTr"), track.tofExpMom(), track.tpcInnerParam());
               }
             }
-            if (isTriton && track.sign() < 0) {
+            if (isTritonTPCpid && track.sign() < 0) {
               histos.fill(HIST("tracks/triton/h2antiTritonTOFbetaVsP"), track.p(), track.beta());
               if (enablePtSpectra) {
                 histos.fill(HIST("tracks/eff/triton/h2pVsTOFExpMomentumantiTr"), track.tofExpMom(), track.p());
@@ -3170,38 +4441,7 @@ struct LFNucleiBATask {
               }
             }
           }
-          if (enableHe && heRapCut) {
-            if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe && track.sign() > 0) {
-              histos.fill(HIST("tracks/helium/h2HeliumTOFbetaVsP"), heP, track.beta());
-              if (enablePtSpectra) {
-                histos.fill(HIST("tracks/eff/helium/h2pVsTOFExpMomentumHe"), track.tofExpMom(), heP);
-                histos.fill(HIST("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumHe"), track.tofExpMom(), heTPCmomentum);
-              }
-            }
-            if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe && track.sign() < 0) {
-              histos.fill(HIST("tracks/helium/h2antiHeliumTOFbetaVsP"), antiheP, track.beta());
-              if (enablePtSpectra) {
-                histos.fill(HIST("tracks/eff/helium/h2pVsTOFExpMomentumantiHe"), track.tofExpMom(), antiheP);
-                histos.fill(HIST("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumantiHe"), track.tofExpMom(), antiheTPCmomentum);
-              }
-            }
-          }
-
-          if (enableDebug) {
-            if (enablePr && prRapCut) {
-              if (track.sign() > 0)
-                debugHistos.fill(HIST("debug/tracks/proton/h3ProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-              else
-                debugHistos.fill(HIST("debug/tracks/proton/h3antiProtonNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaPr(), track.tofNSigmaPr(), track.pt());
-            }
-            if (enableDe && deRapCut) {
-              if (track.sign() > 0)
-                debugHistos.fill(HIST("debug/tracks/deuteron/h3DeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), DPt);
-              else
-                debugHistos.fill(HIST("debug/tracks/deuteron/h3antiDeuteronNSigmaTPCvsNSigmaTOFvsPt"), track.tpcNSigmaDe(), track.tofNSigmaDe(), antiDPt);
-            }
-          }
-          if (enableEvTimeSplitting) {
+          if (filterOptions.enableEvTimeSplitting) {
             if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
               evtimeHistos.fill(HIST("tracks/evtime/ft0tof/h2TOFbetaVsP"), track.p() / (1.f * track.sign()), track.beta());
               evtimeHistos.fill(HIST("tracks/evtime/ft0tof/h2TPCsignVsTPCmomentum"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
@@ -3216,35 +4456,120 @@ struct LFNucleiBATask {
               evtimeHistos.fill(HIST("tracks/evtime/fill/h2TPCsignVsTPCmomentum"), track.tpcInnerParam() / (1.f * track.sign()), track.tpcSignal());
             }
           }
+        }
+      }
 
-          if ((track.beta() * track.beta()) < 1.) {
-            gamma = 1.f / TMath::Sqrt(1.f - (track.beta() * track.beta()));
+      if (isDeWTPCpid) {
+        if (enablePtSpectra) {
+          histos.fill(HIST("tracks/eff/deuteron/hPtDe"), DPt);
+          histos.fill(HIST("tracks/eff/deuteron/h2pVsTPCmomentumDe"), track.tpcInnerParam(), track.p());
+        }
+        histos.fill(HIST("tracks/deuteron/h1DeuteronSpectra"), DPt);
+        histos.fill(HIST("tracks/deuteron/h2DeuteronYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)), DPt);
+        if (enablePIDplot)
+          histos.fill(HIST("tracks/deuteron/h2TPCsignVsTPCmomentumDeuteron"), track.tpcInnerParam(), track.tpcSignal());
+      }
+      if (isAntiDeWTPCpid) {
+        if (enablePtSpectra) {
+          histos.fill(HIST("tracks/eff/deuteron/hPtantiDe"), antiDPt);
+          histos.fill(HIST("tracks/eff/deuteron/h2pVsTPCmomentumantiDe"), track.tpcInnerParam(), track.p());
+        }
+        histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectra"), antiDPt);
+        histos.fill(HIST("tracks/deuteron/h2antiDeuteronYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Deuteron)), antiDPt);
+        if (enablePIDplot)
+          histos.fill(HIST("tracks/deuteron/h2TPCsignVsTPCmomentumantiDeuteron"), track.tpcInnerParam(), track.tpcSignal());
+      }
+      if (isHeWTPCpid) {
+        if (enablePtSpectra) {
+          histos.fill(HIST("tracks/eff/helium/hPtHe"), 2 * hePt);
+          histos.fill(HIST("tracks/eff/helium/h2pVsTPCmomentumHe"), heTPCmomentum, heP);
+        }
+        histos.fill(HIST("tracks/helium/h1HeliumSpectra"), hePt);
+        histos.fill(HIST("tracks/helium/h1HeliumSpectra_Z2"), 2 * hePt);
+        histos.fill(HIST("tracks/helium/h2HeliumYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), hePt);
+        histos.fill(HIST("tracks/helium/h2HeliumYvsPt_Z2"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), 2 * hePt);
+        histos.fill(HIST("tracks/helium/h2HeliumEtavsPt"), track.eta(), hePt);
+        histos.fill(HIST("tracks/helium/h2HeliumEtavsPt_Z2"), track.eta(), 2 * hePt);
+        if (enablePIDplot)
+          histos.fill(HIST("tracks/helium/h2TPCsignVsTPCmomentumHelium"), heTPCmomentum, track.tpcSignal());
+      }
+      if (isAntiHeWTPCpid) {
+        if (enablePtSpectra) {
+          histos.fill(HIST("tracks/eff/helium/hPtantiHe"), 2 * antihePt);
+          histos.fill(HIST("tracks/eff/helium/h2pVsTPCmomentumantiHe"), antiheTPCmomentum, antiheP);
+        }
+        histos.fill(HIST("tracks/helium/h1antiHeliumSpectra"), antihePt);
+        histos.fill(HIST("tracks/helium/h1antiHeliumSpectra_Z2"), 2 * antihePt);
+        histos.fill(HIST("tracks/helium/h2antiHeliumYvsPt"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), antihePt);
+        histos.fill(HIST("tracks/helium/h2antiHeliumYvsPt_Z2"), track.rapidity(o2::track::PID::getMass2Z(o2::track::PID::Helium3)), 2 * antihePt);
+        histos.fill(HIST("tracks/helium/h2antiHeliumEtavsPt"), track.eta(), antihePt);
+        histos.fill(HIST("tracks/helium/h2antiHeliumEtavsPt_Z2"), track.eta(), 2 * antihePt);
+        if (enablePIDplot)
+          histos.fill(HIST("tracks/helium/h2TPCsignVsTPCmomentumantiHelium"), antiheTPCmomentum, track.tpcSignal());
+      }
 
-            switch (massTOFConfig) {
-              case 0:
-                massTOF = track.tpcInnerParam() * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                massTOFhe = heTPCmomentum * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                massTOFantihe = antiheTPCmomentum * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                break;
-              case 1:
-                massTOF = track.tofExpMom() * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                break;
-              case 2:
-                massTOF = track.p() * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                massTOFhe = heP * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                massTOFantihe = antiheP * TMath::Sqrt(1.f / (track.beta() * track.beta()) - 1.f);
-                break;
-            }
-            histos.fill(HIST("tracks/h2TPCsignVsBetaGamma"), (track.beta() * gamma) / (1.f * track.sign()), track.tpcSignal());
-          } else {
-            massTOF = -99.f;
-            massTOFhe = -99.f;
-            massTOFantihe = -99.f;
+      if (outFlagOptions.doTOFplots && track.hasTOF()) {
+        if (isDeWTPCpid) {
+          histos.fill(HIST("tracks/deuteron/h2DeuteronTOFbetaVsP"), track.p(), track.beta());
+          if (enablePtSpectra) {
+            histos.fill(HIST("tracks/eff/deuteron/h2pVsTOFExpMomentumDe"), track.tofExpMom(), track.p());
+            histos.fill(HIST("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumDe"), track.tofExpMom(), track.tpcInnerParam());
           }
+        }
+        if (isAntiDeWTPCpid) {
+          histos.fill(HIST("tracks/deuteron/h2antiDeuteronTOFbetaVsP"), track.p(), track.beta());
+          if (enablePtSpectra) {
+            histos.fill(HIST("tracks/eff/deuteron/h2pVsTOFExpMomentumantiDe"), track.tofExpMom(), track.p());
+            histos.fill(HIST("tracks/eff/deuteron/h2TPCmomentumVsTOFExpMomentumantiDe"), track.tofExpMom(), track.tpcInnerParam());
+          }
+        }
 
-          histos.fill(HIST("tracks/h2TOFmassVsPt"), massTOF, track.pt());
+        if (isHeWTPCpid) {
+          histos.fill(HIST("tracks/helium/h2HeliumTOFbetaVsP"), heP, track.beta());
+          if (enablePtSpectra) {
+            histos.fill(HIST("tracks/eff/helium/h2pVsTOFExpMomentumHe"), track.tofExpMom(), heP);
+            histos.fill(HIST("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumHe"), track.tofExpMom(), heTPCmomentum);
+          }
+        }
 
-          if (enableEvTimeSplitting) {
+        if (isAntiHeWTPCpid) {
+          histos.fill(HIST("tracks/helium/h2antiHeliumTOFbetaVsP"), antiheP, track.beta());
+          if (enablePtSpectra) {
+            histos.fill(HIST("tracks/eff/helium/h2pVsTOFExpMomentumantiHe"), track.tofExpMom(), antiheP);
+            histos.fill(HIST("tracks/eff/helium/h2TPCmomentumVsTOFExpMomentumantiHe"), track.tofExpMom(), antiheTPCmomentum);
+          }
+        }
+
+        if ((track.beta() * track.beta()) < 1.) {
+          gamma = 1.f / std::sqrt(1.f - (track.beta() * track.beta()));
+
+          switch (massTOFConfig) {
+            case 0:
+              massTOF = track.tpcInnerParam() * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              massTOFhe = heTPCmomentum * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              massTOFantihe = antiheTPCmomentum * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              break;
+            case 1:
+              massTOF = track.tofExpMom() * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              break;
+            case 2:
+              massTOF = track.p() * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              massTOFhe = heP * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              massTOFantihe = antiheP * std::sqrt(1.f / (track.beta() * track.beta()) - 1.f);
+              break;
+          }
+          if (passDCAxyzCut && outFlagOptions.doTOFplots && enablePIDplot)
+            histos.fill(HIST("tracks/h2TPCsignVsBetaGamma"), (track.beta() * gamma) / (1.f * track.sign()), track.tpcSignal());
+        } else {
+          massTOF = -99.f;
+          massTOFhe = -99.f;
+          massTOFantihe = -99.f;
+        }
+
+        if (passDCAxyzCut) {
+          if (enablePIDplot)
+            histos.fill(HIST("tracks/h2TOFmassVsPt"), massTOF, track.pt());
+          if (filterOptions.enableEvTimeSplitting) {
             if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
               evtimeHistos.fill(HIST("tracks/evtime/ft0tof/h2TOFmassVsPt"), massTOF, track.pt());
             } else if (track.isEvTimeT0AC()) {
@@ -3257,29 +4582,29 @@ struct LFNucleiBATask {
           }
 
           if (enablePr) {
-            if ((std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) && prRapCut) {
+            if ((std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) && prRapCut) {
               if (track.sign() > 0) {
                 if (enablePtSpectra) {
                   histos.fill(HIST("tracks/eff/proton/hPtPrTOF"), track.pt());
                   histos.fill(HIST("tracks/eff/proton/hPtPrTOFrebinned"), track.pt());
                 }
                 histos.fill(HIST("tracks/proton/h2TOFmassProtonVsPt"), massTOF, track.pt());
-                histos.fill(HIST("tracks/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
-                if (enableBetaCut && (track.beta() > betaCut)) {
+                histos.fill(HIST("tracks/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
+                if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
                   histos.fill(HIST("tracks/proton/h2TOFmassProtonVsPt_BetaCut"), massTOF, track.pt());
-                  histos.fill(HIST("tracks/proton/h2TOFmass2ProtonVsPt_BetaCut"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                  histos.fill(HIST("tracks/proton/h2TOFmass2ProtonVsPt_BetaCut"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                 }
-                if (enableExpSignalTOF)
+                if (outFlagOptions.enableExpSignalTOF)
                   histos.fill(HIST("tracks/proton/h2ProtonTOFExpSignalDiffVsPtCut"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableEvTimeSplitting) {
+                if (filterOptions.enableEvTimeSplitting) {
                   if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   } else if (track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   } else if (track.isEvTimeTOF()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   } else {
-                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2TOFmass2ProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   }
                 }
               } else {
@@ -3288,78 +4613,22 @@ struct LFNucleiBATask {
                   histos.fill(HIST("tracks/eff/proton/hPtantiPrTOFrebinned"), track.pt());
                 }
                 histos.fill(HIST("tracks/proton/h2TOFmassantiProtonVsPt"), massTOF, track.pt());
-                histos.fill(HIST("tracks/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
-                if (enableBetaCut && (track.beta() > betaCut)) {
+                histos.fill(HIST("tracks/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
+                if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
                   histos.fill(HIST("tracks/proton/h2TOFmassantiProtonVsPt_BetaCut"), massTOF, track.pt());
-                  histos.fill(HIST("tracks/proton/h2TOFmass2antiProtonVsPt_BetaCut"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                  histos.fill(HIST("tracks/proton/h2TOFmass2antiProtonVsPt_BetaCut"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                 }
-                if (enableExpSignalTOF)
+                if (outFlagOptions.enableExpSignalTOF)
                   histos.fill(HIST("tracks/proton/h2antiProtonTOFExpSignalDiffVsPtCut"), track.pt(), track.tofExpSignalDiffPr());
-                if (enableEvTimeSplitting) {
+                if (filterOptions.enableEvTimeSplitting) {
                   if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   } else if (track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/ft0/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   } else if (track.isEvTimeTOF()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
+                    evtimeHistos.fill(HIST("tracks/evtime/tof/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   } else {
-                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - fMassProton * fMassProton, track.pt());
-                  }
-                }
-              }
-            }
-          }
-          if (enableDe) {
-            if ((std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) && deRapCut) {
-              if (track.sign() > 0) {
-                if (enablePtSpectra)
-                  histos.fill(HIST("tracks/eff/deuteron/hPtDeTOF"), DPt);
-                histos.fill(HIST("tracks/deuteron/h2TOFmassDeuteronVsPt"), massTOF, DPt);
-                if (enableCentrality)
-                  histos.fill(HIST("tracks/deuteron/h3TOFmass2DeuteronVsPtVsMult"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt, event.centFT0M());
-                else
-                  histos.fill(HIST("tracks/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt);
-                if (enableBetaCut && (track.beta() > betaCut)) {
-                  histos.fill(HIST("tracks/deuteron/h2TOFmassDeuteronVsPt_BetaCut"), massTOF, DPt);
-                  histos.fill(HIST("tracks/deuteron/h2TOFmass2DeuteronVsPt_BetaCut"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt);
-                }
-                if (enableExpSignalTOF)
-                  histos.fill(HIST("tracks/deuteron/h2DeuteronTOFExpSignalDiffVsPtCut"), DPt, track.tofExpSignalDiffDe());
-                if (enableEvTimeSplitting) {
-                  if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt);
-                  } else if (track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt);
-                  } else if (track.isEvTimeTOF()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt);
-                  } else {
-                    evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, DPt);
-                  }
-                }
-
-              } else {
-                if (enablePtSpectra)
-                  histos.fill(HIST("tracks/eff/deuteron/hPtantiDeTOF"), antiDPt);
-                histos.fill(HIST("tracks/deuteron/h2TOFmassantiDeuteronVsPt"), massTOF, antiDPt);
-                if (enableCentrality)
-                  histos.fill(HIST("tracks/deuteron/h3TOFmass2antiDeuteronVsPtVsMult"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt, event.centFT0M());
-                else
-                  histos.fill(HIST("tracks/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt);
-                if (enableBetaCut && (track.beta() > betaCut)) {
-                  histos.fill(HIST("tracks/deuteron/h2TOFmassantiDeuteronVsPt_BetaCut"), massTOF, antiDPt);
-                  histos.fill(HIST("tracks/deuteron/h2TOFmass2antiDeuteronVsPt_BetaCut"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt);
-                }
-                if (enableExpSignalTOF)
-                  histos.fill(HIST("tracks/deuteron/h2antiDeuteronTOFExpSignalDiffVsPtCut"), antiDPt, track.tofExpSignalDiffDe());
-                if (enableEvTimeSplitting) {
-                  if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt);
-                  } else if (track.isEvTimeT0AC()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt);
-                  } else if (track.isEvTimeTOF()) {
-                    evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt);
-                  } else {
-                    evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - fMassDeuteron * fMassDeuteron, antiDPt);
+                    evtimeHistos.fill(HIST("tracks/evtime/fill/proton/h2TOFmass2antiProtonVsPt"), massTOF * massTOF - MassProtonVal * MassProtonVal, track.pt());
                   }
                 }
               }
@@ -3367,57 +4636,108 @@ struct LFNucleiBATask {
           }
 
           if (enableTr) {
-            if ((isTriton) && trRapCut) {
+            if ((isTritonTPCpid) && trRapCut) {
               if (track.sign() > 0) {
                 if (enablePtSpectra)
                   histos.fill(HIST("tracks/eff/triton/hPtTrTOF"), track.pt());
                 histos.fill(HIST("tracks/triton/h2TOFmassTritonVsPt"), massTOF, track.pt());
-                histos.fill(HIST("tracks/triton/h2TOFmass2TritonVsPt"), massTOF * massTOF - fMassTriton * fMassTriton, track.pt());
-                if (enableBetaCut && (track.beta() > betaCut)) {
+                histos.fill(HIST("tracks/triton/h2TOFmass2TritonVsPt"), massTOF * massTOF - MassTritonVal * MassTritonVal, track.pt());
+                if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
                   histos.fill(HIST("tracks/triton/h2TOFmassTritonVsPt_BetaCut"), massTOF, track.pt());
-                  histos.fill(HIST("tracks/triton/h2TOFmass2TritonVsPt_BetaCut"), massTOF * massTOF - fMassTriton * fMassTriton, track.pt());
+                  histos.fill(HIST("tracks/triton/h2TOFmass2TritonVsPt_BetaCut"), massTOF * massTOF - MassTritonVal * MassTritonVal, track.pt());
                 }
               } else {
                 if (enablePtSpectra)
                   histos.fill(HIST("tracks/eff/triton/hPtantiTrTOF"), track.pt());
                 histos.fill(HIST("tracks/triton/h2TOFmassantiTritonVsPt"), massTOF, track.pt());
-                histos.fill(HIST("tracks/triton/h2TOFmass2antiTritonVsPt"), massTOF * massTOF - fMassTriton * fMassTriton, track.pt());
-                if (enableBetaCut && (track.beta() > betaCut)) {
+                histos.fill(HIST("tracks/triton/h2TOFmass2antiTritonVsPt"), massTOF * massTOF - MassTritonVal * MassTritonVal, track.pt());
+                if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
                   histos.fill(HIST("tracks/triton/h2TOFmassantiTritonVsPt_BetaCut"), massTOF, track.pt());
-                  histos.fill(HIST("tracks/triton/h2TOFmass2antiTritonVsPt_BetaCut"), massTOF * massTOF - fMassTriton * fMassTriton, track.pt());
+                  histos.fill(HIST("tracks/triton/h2TOFmass2antiTritonVsPt_BetaCut"), massTOF * massTOF - MassTritonVal * MassTritonVal, track.pt());
                 }
               }
             }
           }
-          if (enableHe) {
-            if ((std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) && heRapCut) {
-              if (track.sign() > 0) {
-                if (enablePtSpectra)
-                  histos.fill(HIST("tracks/eff/helium/hPtHeTOF"), hePt);
-                histos.fill(HIST("tracks/helium/h2TOFmassHeliumVsPt"), 2.f * massTOFhe, hePt);
-                histos.fill(HIST("tracks/helium/h2TOFmassDeltaHeliumVsPt"), 2.f * massTOFhe - fMassHelium, hePt);
-                histos.fill(HIST("tracks/helium/h2TOFmass2HeliumVsPt"), 2.f * massTOFhe * 2.f * massTOFhe - fMassHelium * fMassHelium, hePt);
-                if (enableBetaCut && (track.beta() > betaCut)) {
-                  histos.fill(HIST("tracks/helium/h2TOFmassHeliumVsPt_BetaCut"), 2.f * massTOFhe, hePt);
-                  histos.fill(HIST("tracks/helium/h2TOFmass2HeliumVsPt_BetaCut"), 2.f * massTOFhe * 2.f * massTOFhe - fMassHelium * fMassHelium, hePt);
-                }
-                if (enableExpSignalTOF)
-                  histos.fill(HIST("tracks/helium/h2HeliumTOFExpSignalDiffVsPtCut"), hePt, track.tofExpSignalDiffHe());
-              } else {
-                if (enablePtSpectra)
-                  histos.fill(HIST("tracks/eff/helium/hPtantiHeTOF"), antihePt);
-                histos.fill(HIST("tracks/helium/h2TOFmassantiHeliumVsPt"), 2.f * massTOFantihe, antihePt);
-                histos.fill(HIST("tracks/helium/h2TOFmassDeltaantiHeliumVsPt"), 2.f * massTOFantihe - fMassHelium, antihePt);
-                histos.fill(HIST("tracks/helium/h2TOFmass2antiHeliumVsPt"), 2.f * massTOFantihe * 2.f * massTOFantihe - fMassHelium * fMassHelium, antihePt);
-                if (enableBetaCut && (track.beta() > betaCut)) {
-                  histos.fill(HIST("tracks/helium/h2TOFmassantiHeliumVsPt_BetaCut"), 2.f * massTOFantihe, antihePt);
-                  histos.fill(HIST("tracks/helium/h2TOFmass2antiHeliumVsPt_BetaCut"), 2.f * massTOFantihe * 2.f * massTOFantihe - fMassHelium * fMassHelium, antihePt);
-                }
-                if (enableExpSignalTOF)
-                  histos.fill(HIST("tracks/helium/h2antiHeliumTOFExpSignalDiffVsPtCut"), antihePt, track.tofExpSignalDiffHe());
-              }
+        }
+
+        if (isDeWTPCpid) {
+          if (enablePtSpectra)
+            histos.fill(HIST("tracks/eff/deuteron/hPtDeTOF"), DPt);
+          histos.fill(HIST("tracks/deuteron/h2TOFmassDeuteronVsPt"), massTOF, DPt);
+          if (enableCentrality)
+            histos.fill(HIST("tracks/deuteron/h3TOFmass2DeuteronVsPtVsMult"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt, event.centFT0M());
+          else
+            histos.fill(HIST("tracks/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt);
+          if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
+            histos.fill(HIST("tracks/deuteron/h2TOFmassDeuteronVsPt_BetaCut"), massTOF, DPt);
+            histos.fill(HIST("tracks/deuteron/h2TOFmass2DeuteronVsPt_BetaCut"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt);
+          }
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/deuteron/h2DeuteronTOFExpSignalDiffVsPtCut"), DPt, track.tofExpSignalDiffDe());
+          if (filterOptions.enableEvTimeSplitting) {
+            if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
+              evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt);
+            } else if (track.isEvTimeT0AC()) {
+              evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt);
+            } else if (track.isEvTimeTOF()) {
+              evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt);
+            } else {
+              evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2TOFmass2DeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, DPt);
             }
           }
+        }
+        if (isAntiDeWTPCpid) {
+          if (enablePtSpectra)
+            histos.fill(HIST("tracks/eff/deuteron/hPtantiDeTOF"), antiDPt);
+          histos.fill(HIST("tracks/deuteron/h2TOFmassantiDeuteronVsPt"), massTOF, antiDPt);
+          if (enableCentrality)
+            histos.fill(HIST("tracks/deuteron/h3TOFmass2antiDeuteronVsPtVsMult"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt, event.centFT0M());
+          else
+            histos.fill(HIST("tracks/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt);
+          if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
+            histos.fill(HIST("tracks/deuteron/h2TOFmassantiDeuteronVsPt_BetaCut"), massTOF, antiDPt);
+            histos.fill(HIST("tracks/deuteron/h2TOFmass2antiDeuteronVsPt_BetaCut"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt);
+          }
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/deuteron/h2antiDeuteronTOFExpSignalDiffVsPtCut"), antiDPt, track.tofExpSignalDiffDe());
+          if (filterOptions.enableEvTimeSplitting) {
+            if (track.isEvTimeTOF() && track.isEvTimeT0AC()) {
+              evtimeHistos.fill(HIST("tracks/evtime/ft0tof/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt);
+            } else if (track.isEvTimeT0AC()) {
+              evtimeHistos.fill(HIST("tracks/evtime/ft0/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt);
+            } else if (track.isEvTimeTOF()) {
+              evtimeHistos.fill(HIST("tracks/evtime/tof/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt);
+            } else {
+              evtimeHistos.fill(HIST("tracks/evtime/fill/deuteron/h2TOFmass2antiDeuteronVsPt"), massTOF * massTOF - MassDeuteronVal * MassDeuteronVal, antiDPt);
+            }
+          }
+        }
+
+        if (isHeWTPCpid) {
+          if (enablePtSpectra)
+            histos.fill(HIST("tracks/eff/helium/hPtHeTOF"), 2 * hePt);
+          histos.fill(HIST("tracks/helium/h2TOFmassHeliumVsPt"), 2.f * massTOFhe, hePt);
+          histos.fill(HIST("tracks/helium/h2TOFmassDeltaHeliumVsPt"), 2.f * massTOFhe - MassHeliumVal, hePt);
+          histos.fill(HIST("tracks/helium/h2TOFmass2HeliumVsPt"), 2.f * massTOFhe * 2.f * massTOFhe - MassHeliumVal * MassHeliumVal, hePt);
+          if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
+            histos.fill(HIST("tracks/helium/h2TOFmassHeliumVsPt_BetaCut"), 2.f * massTOFhe, hePt);
+            histos.fill(HIST("tracks/helium/h2TOFmass2HeliumVsPt_BetaCut"), 2.f * massTOFhe * 2.f * massTOFhe - MassHeliumVal * MassHeliumVal, hePt);
+          }
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/helium/h2HeliumTOFExpSignalDiffVsPtCut"), hePt, track.tofExpSignalDiffHe());
+        }
+        if (isAntiHeWTPCpid) {
+          if (enablePtSpectra)
+            histos.fill(HIST("tracks/eff/helium/hPtantiHeTOF"), 2 * antihePt);
+          histos.fill(HIST("tracks/helium/h2TOFmassantiHeliumVsPt"), 2.f * massTOFantihe, antihePt);
+          histos.fill(HIST("tracks/helium/h2TOFmassDeltaantiHeliumVsPt"), 2.f * massTOFantihe - MassHeliumVal, antihePt);
+          histos.fill(HIST("tracks/helium/h2TOFmass2antiHeliumVsPt"), 2.f * massTOFantihe * 2.f * massTOFantihe - MassHeliumVal * MassHeliumVal, antihePt);
+          if (outFlagOptions.enableBetaCut && (track.beta() > betaCut)) {
+            histos.fill(HIST("tracks/helium/h2TOFmassantiHeliumVsPt_BetaCut"), 2.f * massTOFantihe, antihePt);
+            histos.fill(HIST("tracks/helium/h2TOFmass2antiHeliumVsPt_BetaCut"), 2.f * massTOFantihe * 2.f * massTOFantihe - MassHeliumVal * MassHeliumVal, antihePt);
+          }
+          if (outFlagOptions.enableExpSignalTOF)
+            histos.fill(HIST("tracks/helium/h2antiHeliumTOFExpSignalDiffVsPtCut"), antihePt, track.tofExpSignalDiffHe());
         }
       }
 
@@ -3470,106 +4790,107 @@ struct LFNucleiBATask {
           isGoodHit = !hasFakeHit;
         }
 
-        if ((track.sign() > 0) && enableTrackingEff) {
-          if (isItsPassed) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1_its"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its"), track.pt());
+        if (passDCAxyzCut) {
+          if ((track.sign() > 0) && enableTrackingEff) {
+            if (isItsPassed) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1_its"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its"), track.pt());
+              }
             }
-          }
 
-          if (isTpcPassed) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1_tpc"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_tpc"), track.pt());
+            if (isTpcPassed) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1_tpc"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_tpc"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc"), track.pt());
+            if (isItsPassed && isTpcPassed) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed && track.hasTOF()) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc_tof"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc_tof"), track.pt());
+            if (isItsPassed && isTpcPassed && track.hasTOF()) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc_tof"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc_tof"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed && track.hasTRD()) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc_trd"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc_trd"), track.pt());
+            if (isItsPassed && isTpcPassed && track.hasTRD()) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc_trd"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc_trd"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed && track.hasTOF() && track.hasTRD()) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc_trd_tof"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc_trd_tof"), track.pt());
+            if (isItsPassed && isTpcPassed && track.hasTOF() && track.hasTRD()) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1_its_tpc_trd_tof"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1GoodHit_its_tpc_trd_tof"), track.pt());
+              }
             }
-          }
-        } else if ((track.sign() < 0) && enableTrackingEff) {
-          if (isItsPassed) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1anti_its"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its"), track.pt());
+          } else if ((track.sign() < 0) && enableTrackingEff) {
+            if (isItsPassed) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1anti_its"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its"), track.pt());
+              }
             }
-          }
 
-          if (isTpcPassed) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1anti_tpc"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_tpc"), track.pt());
+            if (isTpcPassed) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1anti_tpc"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_tpc"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc"), track.pt());
+            if (isItsPassed && isTpcPassed) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed && track.hasTOF()) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc_tof"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc_tof"), track.pt());
+            if (isItsPassed && isTpcPassed && track.hasTOF()) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc_tof"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc_tof"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed && track.hasTRD()) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc_trd"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc_trd"), track.pt());
+            if (isItsPassed && isTpcPassed && track.hasTRD()) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc_trd"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc_trd"), track.pt());
+              }
             }
-          }
 
-          if (isItsPassed && isTpcPassed && track.hasTOF() && track.hasTRD()) {
-            debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc_trd_tof"), track.pt());
-            if (isGoodHit) {
-              debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc_trd_tof"), track.pt());
+            if (isItsPassed && isTpcPassed && track.hasTOF() && track.hasTRD()) {
+              debugHistos.fill(HIST("tracks/trackingEff/h1anti_its_tpc_trd_tof"), track.pt());
+              if (isGoodHit) {
+                debugHistos.fill(HIST("tracks/trackingEff/h1antiGoodHit_its_tpc_trd_tof"), track.pt());
+              }
             }
           }
         }
-
         switch (pdgCode) {
           case PDGProton:
-            if (enablePr && prRapCut) {
+            if (enablePr && prRapCut && passDCAxyzCut) {
               histos.fill(HIST("tracks/proton/h1ProtonSpectraTrue"), track.pt());
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtProtonTrue"), track.pt(), track.dcaXY());
                 histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtProtonTrue"), track.pt(), track.dcaZ());
               }
-              if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) {
+              if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
                 histos.fill(HIST("tracks/proton/h1ProtonSpectraTrueWPID"), track.pt());
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/proton/h1ProtonSpectraTruePrim"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtProtonTruePrim"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtProtonTruePrim"), track.pt(), track.dcaZ());
                 }
@@ -3618,7 +4939,7 @@ struct LFNucleiBATask {
                   }
                 }
 
-                if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) {
+                if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
                   if (enableTrackingEff) {
                     if (isItsPassed) {
                       debugHistos.fill(HIST("tracks/proton/trackingEffPID/h1ProtonSpectraPIDTruePrim_its"), track.pt());
@@ -3666,13 +4987,13 @@ struct LFNucleiBATask {
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/proton/h1ProtonSpectraTrueTransport"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtProtonTrueTransport"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtProtonTrueTransport"), track.pt(), track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/proton/h1ProtonSpectraTrueSec"), track.pt());
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtProtonTrueSec"), track.pt(), track.dcaXY());
                     histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtProtonTrueSec"), track.pt(), track.dcaZ());
                   }
@@ -3681,18 +5002,18 @@ struct LFNucleiBATask {
             }
             break;
           case -PDGProton:
-            if (enablePr && prRapCut) {
+            if (enablePr && prRapCut && passDCAxyzCut) {
               histos.fill(HIST("tracks/proton/h1antiProtonSpectraTrue"), track.pt());
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtantiProtonTrue"), track.pt(), track.dcaXY());
                 histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtantiProtonTrue"), track.pt(), track.dcaZ());
               }
-              if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) {
+              if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
                 histos.fill(HIST("tracks/proton/h1antiProtonSpectraTrueWPID"), track.pt());
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/proton/h1antiProtonSpectraTruePrim"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtantiProtonTruePrim"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtantiProtonTruePrim"), track.pt(), track.dcaZ());
                 }
@@ -3741,7 +5062,7 @@ struct LFNucleiBATask {
                   }
                 }
 
-                if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCPr) {
+                if (std::abs(track.tpcNSigmaPr()) < nsigmaTPCvar.nsigmaTPCPr) {
                   if (enableTrackingEff) {
                     if (isItsPassed) {
                       debugHistos.fill(HIST("tracks/proton/trackingEffPID/h1antiProtonSpectraPIDTruePrim_its"), track.pt());
@@ -3790,13 +5111,13 @@ struct LFNucleiBATask {
 
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/proton/h1antiProtonSpectraTrueTransport"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtantiProtonTrueTransport"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtantiProtonTrueTransport"), track.pt(), track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/proton/h1antiProtonSpectraTrueSec"), track.pt());
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/proton/dca/after/hDCAxyVsPtantiProtonTrueSec"), track.pt(), track.dcaXY());
                     histos.fill(HIST("tracks/proton/dca/after/hDCAzVsPtantiProtonTrueSec"), track.pt(), track.dcaZ());
                   }
@@ -3805,22 +5126,22 @@ struct LFNucleiBATask {
             }
             break;
           case PDGDeuteron:
-            if (enableDe && deRapCut) {
+            if (isDeuteron && passDCAzCutDe && passDCAxyCutDe) {
               histos.fill(HIST("tracks/deuteron/h1DeuteronSpectraTrue"), DPt);
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTrue"), DPt, track.dcaXY());
                 histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTrue"), DPt, track.dcaZ());
               }
-              if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) {
+              if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe) {
                 histos.fill(HIST("tracks/deuteron/h1DeuteronSpectraTrueWPID"), DPt);
-                if (track.hasTOF() && doTOFplots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/deuteron/hPtDeuteronTOFTrue"), DPt);
                 }
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/deuteron/h2DeuteronVspTNSigmaTPCTruePrim"), DPt, track.tpcNSigmaDe());
                 histos.fill(HIST("tracks/deuteron/h1DeuteronSpectraTruePrim"), DPt);
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTruePrim"), DPt, track.dcaXY());
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTruePrim"), DPt, track.dcaZ());
                 }
@@ -3869,13 +5190,13 @@ struct LFNucleiBATask {
                   }
                 }
 
-                if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) {
+                if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe) {
                   histos.fill(HIST("tracks/deuteron/h1DeuteronSpectraTrueWPIDPrim"), DPt);
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTrueWPIDPrim"), DPt, track.dcaXY());
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTrueWPIDPrim"), DPt, track.dcaZ());
                   }
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/deuteron/hPtDeuteronTOFTrueWPIDPrim"), DPt);
                   }
 
@@ -3926,13 +5247,13 @@ struct LFNucleiBATask {
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/deuteron/h1DeuteronSpectraTrueTransport"), DPt);
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTrueTransport"), DPt, track.dcaXY());
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTrueTransport"), DPt, track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/deuteron/h1DeuteronSpectraTrueSec"), DPt);
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtDeuteronTrueSec"), DPt, track.dcaXY());
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtDeuteronTrueSec"), DPt, track.dcaZ());
                   }
@@ -3941,22 +5262,22 @@ struct LFNucleiBATask {
             }
             break;
           case -PDGDeuteron:
-            if (enableDe && deRapCut) {
+            if (isDeuteron && passDCAzCutAntiDe && passDCAxyCutAntiDe) {
               histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectraTrue"), antiDPt);
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteronTrue"), antiDPt, track.dcaXY());
                 histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteronTrue"), antiDPt, track.dcaZ());
               }
-              if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) {
+              if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe) {
                 histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectraTrueWPID"), antiDPt);
-                if (track.hasTOF() && doTOFplots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/deuteron/hPtantiDeuteronTOFTrue"), antiDPt);
                 }
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/deuteron/h2antiDeuteronVspTNSigmaTPCTruePrim"), antiDPt, track.tpcNSigmaDe());
                 histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectraTruePrim"), antiDPt);
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteronTruePrim"), antiDPt, track.dcaXY());
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteronTruePrim"), antiDPt, track.dcaZ());
                 }
@@ -4005,13 +5326,13 @@ struct LFNucleiBATask {
                   }
                 }
 
-                if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCDe) {
+                if (std::abs(track.tpcNSigmaDe()) < nsigmaTPCvar.nsigmaTPCDe) {
                   histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectraTrueWPIDPrim"), antiDPt);
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteronTrueWPIDPrim"), antiDPt, track.dcaXY());
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteronTrueWPIDPrim"), antiDPt, track.dcaZ());
                   }
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/deuteron/hPtantiDeuteronTOFTrueWPIDPrim"), antiDPt);
                   }
 
@@ -4062,13 +5383,13 @@ struct LFNucleiBATask {
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectraTrueTransport"), antiDPt);
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaXY());
                   histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteronTrueTransport"), antiDPt, track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/deuteron/h1antiDeuteronSpectraTrueSec"), antiDPt);
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAxyVsPtantiDeuteronTrueSec"), antiDPt, track.dcaXY());
                     histos.fill(HIST("tracks/deuteron/dca/after/hDCAzVsPtantiDeuteronTrueSec"), antiDPt, track.dcaZ());
                   }
@@ -4077,28 +5398,28 @@ struct LFNucleiBATask {
             }
             break;
           case PDGTriton:
-            if (enableTr && trRapCut) {
+            if (enableTr && trRapCut && passDCAxyzCut) {
               histos.fill(HIST("tracks/triton/h1TritonSpectraTrue"), track.pt());
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtTritonTrue"), track.pt(), track.dcaXY());
                 histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtTritonTrue"), track.pt(), track.dcaZ());
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/triton/h1TritonSpectraTruePrim"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtTritonTruePrim"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtTritonTruePrim"), track.pt(), track.dcaZ());
                 }
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/triton/h1TritonSpectraTrueTransport"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtTritonTrueTransport"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtTritonTrueTransport"), track.pt(), track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/triton/h1TritonSpectraTrueSec"), track.pt());
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtTritonTrueSec"), track.pt(), track.dcaXY());
                     histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtTritonTrueSec"), track.pt(), track.dcaZ());
                   }
@@ -4107,28 +5428,28 @@ struct LFNucleiBATask {
             }
             break;
           case -PDGTriton:
-            if (enableTr && trRapCut) {
+            if (enableTr && trRapCut && passDCAxyzCut) {
               histos.fill(HIST("tracks/triton/h1antiTritonSpectraTrue"), track.pt());
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtantiTritonTrue"), track.pt(), track.dcaXY());
                 histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtantiTritonTrue"), track.pt(), track.dcaZ());
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/triton/h1antiTritonSpectraTruePrim"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtantiTritonTruePrim"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtantiTritonTruePrim"), track.pt(), track.dcaZ());
                 }
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/triton/h1antiTritonSpectraTrueTransport"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtantiTritonTrueTransport"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtantiTritonTrueTransport"), track.pt(), track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/triton/h1antiTritonSpectraTrueSec"), track.pt());
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/triton/dca/after/hDCAxyVsPtantiTritonTrueSec"), track.pt(), track.dcaXY());
                     histos.fill(HIST("tracks/triton/dca/after/hDCAzVsPtantiTritonTrueSec"), track.pt(), track.dcaZ());
                   }
@@ -4137,25 +5458,25 @@ struct LFNucleiBATask {
             }
             break;
           case PDGHelium:
-            if (enableHe && heRapCut) {
+            if (isHelium && passDCAzCutHe && passDCAxyCutHe) {
               histos.fill(HIST("tracks/helium/h1HeliumSpectraTrue"), hePt);
               histos.fill(HIST("tracks/helium/h1HeliumSpectraTrue_Z2"), 2 * hePt);
 
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
                 histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
 
-                if (track.hasTOF() && doTOFplots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrue"), hePt, track.dcaXY());
                   histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrue"), hePt, track.dcaZ());
                 }
               }
-              if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) {
+              if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe) {
                 histos.fill(HIST("tracks/helium/h1HeliumSpectraTrueWPID"), hePt);
                 histos.fill(HIST("tracks/helium/h1HeliumSpectraTrueWPID_Z2"), 2 * hePt);
                 if (enablePtSpectra) {
                   histos.fill(HIST("tracks/eff/helium/hPtHeTrue"), 2 * hePt);
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/eff/helium/hPtHeTOFTrue"), 2 * hePt);
                   }
                 }
@@ -4164,16 +5485,16 @@ struct LFNucleiBATask {
                 histos.fill(HIST("tracks/helium/h1HeliumSpectraTruePrim"), hePt);
                 histos.fill(HIST("tracks/helium/h1HeliumSpectraTruePrim_Z2"), 2 * hePt);
 
-                if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) {
-                  if (track.hasTOF() && doTOFplots) {
+                if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/TOF/h1HeliumSpectraTruePrim_Z2"), 2 * hePt);
                   }
                 }
 
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
                   histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTruePrim"), hePt, track.dcaXY());
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTruePrim"), hePt, track.dcaZ());
                   }
@@ -4184,10 +5505,10 @@ struct LFNucleiBATask {
                 histos.fill(HIST("tracks/helium/h1HeliumSpectraTrueTransport"), hePt);
                 histos.fill(HIST("tracks/helium/h1HeliumSpectraTrueTransport_Z2"), 2 * hePt);
 
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
                   histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrueTransport"), hePt, track.dcaXY());
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrueTransport"), hePt, track.dcaZ());
                   }
@@ -4196,10 +5517,10 @@ struct LFNucleiBATask {
                   histos.fill(HIST("tracks/helium/h1HeliumSpectraTrueSec"), hePt);
                   histos.fill(HIST("tracks/helium/h1HeliumSpectraTrueSec_Z2"), 2 * hePt);
 
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
                     histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
-                    if (track.hasTOF() && doTOFplots) {
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
                       histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtHeliumTrueSec"), hePt, track.dcaXY());
                       histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtHeliumTrueSec"), hePt, track.dcaZ());
                     }
@@ -4209,24 +5530,24 @@ struct LFNucleiBATask {
             }
             break;
           case -PDGHelium:
-            if (enableHe && heRapCut) {
+            if (isHelium && passDCAzCutAntiHe && passDCAxyCutAntiHe) {
               histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrue"), antihePt);
               histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrue_Z2"), 2 * antihePt);
 
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
                 histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
-                if (track.hasTOF() && doTOFplots) {
+                if (track.hasTOF() && outFlagOptions.doTOFplots) {
                   histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrue"), antihePt, track.dcaXY());
                   histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrue"), antihePt, track.dcaZ());
                 }
               }
-              if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) {
+              if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe) {
                 histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrueWPID"), antihePt);
                 histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrueWPID_Z2"), 2 * antihePt);
                 if (enablePtSpectra) {
                   histos.fill(HIST("tracks/eff/helium/hPtantiHeTrue"), 2 * antihePt);
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/eff/helium/hPtantiHeTOFTrue"), 2 * antihePt);
                   }
                 }
@@ -4235,16 +5556,16 @@ struct LFNucleiBATask {
                 histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTruePrim"), antihePt);
                 histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTruePrim_Z2"), 2 * antihePt);
 
-                if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCHe) {
-                  if (track.hasTOF() && doTOFplots) {
+                if (std::abs(track.tpcNSigmaHe()) < nsigmaTPCvar.nsigmaTPCHe) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/TOF/h1antiHeliumSpectraTruePrim_Z2"), 2 * antihePt);
                   }
                 }
 
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
                   histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTruePrim"), antihePt, track.dcaXY());
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTruePrim"), antihePt, track.dcaZ());
                   }
@@ -4254,10 +5575,10 @@ struct LFNucleiBATask {
                 histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrueTransport"), antihePt);
                 histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrueTransport_Z2"), 2 * antihePt);
 
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
                   histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
-                  if (track.hasTOF() && doTOFplots) {
+                  if (track.hasTOF() && outFlagOptions.doTOFplots) {
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrueTransport"), antihePt, track.dcaXY());
                     histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrueTransport"), antihePt, track.dcaZ());
                   }
@@ -4267,10 +5588,10 @@ struct LFNucleiBATask {
                   histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrueSec"), antihePt);
                   histos.fill(HIST("tracks/helium/h1antiHeliumSpectraTrueSec_Z2"), 2 * antihePt);
 
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/helium/dca/after/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
                     histos.fill(HIST("tracks/helium/dca/after/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
-                    if (track.hasTOF() && doTOFplots) {
+                    if (track.hasTOF() && outFlagOptions.doTOFplots) {
                       histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAxyVsPtantiHeliumTrueSec"), antihePt, track.dcaXY());
                       histos.fill(HIST("tracks/helium/dca/after/TOF/hDCAzVsPtantiHeliumTrueSec"), antihePt, track.dcaZ());
                     }
@@ -4280,29 +5601,29 @@ struct LFNucleiBATask {
             }
             break;
           case PDGAlpha:
-            if (enableAl && alRapCut) {
+            if (enableAl && alRapCut && passDCAxyzCut) {
               histos.fill(HIST("tracks/alpha/h1AlphaSpectraTrue"), track.pt());
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrue"), track.pt(), track.dcaXY());
                 histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtAlphaTrue"), track.pt(), track.dcaZ());
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/alpha/h1AlphaSpectraTruePrim"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtAlphaTruePrim"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtAlphaTruePrim"), track.pt(), track.dcaZ());
                 }
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/alpha/h1AlphaSpectraTrueTransport"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrueTransport"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtAlphaTrueTransport"), track.pt(), track.dcaZ());
                 }
 
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/alpha/h1AlphaSpectraTrueSec"), track.pt());
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtAlphaTrueSec"), track.pt(), track.dcaXY());
                     histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtAlphaTrueSec"), track.pt(), track.dcaZ());
                   }
@@ -4311,28 +5632,28 @@ struct LFNucleiBATask {
             }
             break;
           case -PDGAlpha:
-            if (enableAl && alRapCut) {
+            if (enableAl && alRapCut && passDCAxyzCut) {
               histos.fill(HIST("tracks/alpha/h1antiAlphaSpectraTrue"), track.pt());
-              if (makeDCAAfterCutPlots) {
+              if (outFlagOptions.makeDCAAfterCutPlots) {
                 histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrue"), track.pt(), track.dcaXY());
                 histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtantiAlphaTrue"), track.pt(), track.dcaZ());
               }
               if (isPhysPrim) {
                 histos.fill(HIST("tracks/alpha/h1antiAlphaSpectraTruePrim"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTruePrim"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtantiAlphaTruePrim"), track.pt(), track.dcaZ());
                 }
               }
               if (!isPhysPrim && !isProdByGen) {
                 histos.fill(HIST("tracks/alpha/h1antiAlphaSpectraTrueTransport"), track.pt());
-                if (makeDCAAfterCutPlots) {
+                if (outFlagOptions.makeDCAAfterCutPlots) {
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrueTransport"), track.pt(), track.dcaXY());
                   histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtantiAlphaTrueTransport"), track.pt(), track.dcaZ());
                 }
                 if (isWeakDecay) {
                   histos.fill(HIST("tracks/alpha/h1antiAlphaSpectraTrueSec"), track.pt());
-                  if (makeDCAAfterCutPlots) {
+                  if (outFlagOptions.makeDCAAfterCutPlots) {
                     histos.fill(HIST("tracks/alpha/dca/after/hDCAxyVsPtantiAlphaTrueSec"), track.pt(), track.dcaXY());
                     histos.fill(HIST("tracks/alpha/dca/after/hDCAzVsPtantiAlphaTrueSec"), track.pt(), track.dcaZ());
                   }
@@ -4379,37 +5700,41 @@ struct LFNucleiBATask {
 
   // Process function that runs on the original AO2D
   void processData(EventCandidates::iterator const& event,
-                   TrackCandidates const& tracks)
+                   TrackCandidates const& tracks,
+                   o2::aod::BCsWithTimestamps const&)
   {
     fillHistograms<false /*MC*/, false /*Filtered*/>(event, tracks, true /*dummy*/);
-  } // CLOSING PROCESS DATA
+  }
   PROCESS_SWITCH(LFNucleiBATask, processData, "process data", true);
 
   // Process function that runs on the original AO2D
   void processDataLfPid(EventCandidates::iterator const& event,
-                        TrackCandidatesLfPid const& tracks)
+                        TrackCandidatesLfPid const& tracks,
+                        o2::aod::BCsWithTimestamps const&)
   {
     fillHistograms<false /*MC*/, false /*Filtered*/>(event, tracks, true /*dummy*/);
-  } // CLOSING PROCESS DATA
+  }
   PROCESS_SWITCH(LFNucleiBATask, processDataLfPid, "process data with LF PID", false);
 
   // Process function that runs on the filtered data
   void processDataFiltered(o2::aod::LfNuclEvents::iterator const& event,
-                           o2::aod::LfCandNucleusFull const& tracks)
+                           o2::aod::LfCandNucleusFull const& tracks,
+                           o2::aod::BCsWithTimestamps const&)
   {
     // Runs on data filtered on the fly with LF Tree creator nuclei task
     // Takes as input full AO2Ds
     fillHistograms<false /*MC*/, true /*Filtered*/>(event, tracks, true /*dummy*/);
-  } // CLOSING PROCESS DATA ON FILTERED DATA
+  }
   PROCESS_SWITCH(LFNucleiBATask, processDataFiltered, "process data on the filtered data", false);
 
   void processDataLight(o2::aod::LfNuclEvents::iterator const& event,
-                        o2::aod::LfCandNucleusDummy const& tracks)
+                        o2::aod::LfCandNucleusDummy const& tracks,
+                        o2::aod::BCsWithTimestamps const&)
   {
     // Runs on derived tables produced with LF Tree creator nuclei task
     // Takes as input derived trees
     fillHistograms<false /*MC*/, true /*Filtered*/>(event, tracks, true /*dummy*/);
-  } // CLOSING PROCESS DATA ON FILTERED DATA
+  }
   PROCESS_SWITCH(LFNucleiBATask, processDataLight, "process data on the derived trees", false);
 
   /////////////
@@ -4417,18 +5742,20 @@ struct LFNucleiBATask {
   /////////////
 
   // Process function that runs on the original AO2D (for the MC)
-  void processMCReco(EventCandidates::iterator const& event,
+  void processMCReco(EventCandidatesMC::iterator const& event,
                      soa::Join<TrackCandidates, aod::McTrackLabels> const& tracks,
-                     aod::McParticles const& mcParticles)
+                     aod::McParticles const& mcParticles,
+                     o2::aod::BCsWithTimestamps const&)
   {
     fillHistograms<true /*MC*/, false /*Filtered*/>(event, tracks, mcParticles);
   } // CLOSING PROCESS MC RECO
   PROCESS_SWITCH(LFNucleiBATask, processMCReco, "process mc reco", false);
 
   // Process function that runs on the original AO2D (for the MC) with the LfPIDcalibration
-  void processMCRecoLfPid(EventCandidates::iterator const& event,
+  void processMCRecoLfPid(EventCandidatesMC::iterator const& event,
                           soa::Join<TrackCandidatesLfPid, aod::McTrackLabels> const& tracks,
-                          aod::McParticles const& mcParticles)
+                          aod::McParticles const& mcParticles,
+                          o2::aod::BCsWithTimestamps const&)
   {
     fillHistograms<true /*MC*/, false /*Filtered*/>(event, tracks, mcParticles);
   } // CLOSING PROCESS MC RECO
@@ -4442,21 +5769,16 @@ struct LFNucleiBATask {
                             aod::McParticles const& mcParticles,
                             aod::McCollisions const&)
   {
-    /*
-      for (const auto& track : tracks) {
-      if (!track.has_collision())
-        continue;
-      // const auto& mcParticle = track.mcParticle();
-    }
-    */
-
     for (const auto& collision : collisions) {
       if (!collision.has_mcCollision()) {
         continue;
       }
-      // const auto& mcParticle = track.mcParticle();
       const auto& particlesInCollision = mcParticles.sliceByCached(aod::mcparticle::mcCollisionId, collision.mcCollision().globalIndex(), cache);
+
       for (const auto& mcParticle : particlesInCollision) {
+        if (mcParticle.y() > kinemOptions.yHighCut || mcParticle.y() < kinemOptions.yLowCut) {
+          continue;
+        }
         spectraGen.fill(HIST("LfEv/pT_nocut"), mcParticle.pt());
         if (mcParticle.pdgCode() == PDGHelium) {
           spectraGen.fill(HIST("LfEv/helium/pT_nocut_He"), mcParticle.pt());
@@ -4467,6 +5789,10 @@ struct LFNucleiBATask {
       }
       if (collision.selection_bit(aod::evsel::kIsTriggerTVX)) {
         for (const auto& mcParticle : particlesInCollision) {
+          if (mcParticle.y() > kinemOptions.yHighCut || mcParticle.y() < kinemOptions.yLowCut) {
+            continue;
+          }
+
           spectraGen.fill(HIST("LfEv/pT_TVXtrigger"), mcParticle.pt());
           if (mcParticle.pdgCode() == PDGHelium) {
             spectraGen.fill(HIST("LfEv/helium/pT_TVXtrigger_He"), mcParticle.pt());
@@ -4478,6 +5804,10 @@ struct LFNucleiBATask {
       }
       if (collision.selection_bit(aod::evsel::kNoTimeFrameBorder)) {
         for (const auto& mcParticle : particlesInCollision) {
+          if (mcParticle.y() > kinemOptions.yHighCut || mcParticle.y() < kinemOptions.yLowCut) {
+            continue;
+          }
+
           spectraGen.fill(HIST("LfEv/pT_TFrameBorder"), mcParticle.pt());
           if (mcParticle.pdgCode() == PDGHelium) {
             spectraGen.fill(HIST("LfEv/helium/pT_TFrameBorder_He"), mcParticle.pt());
@@ -4489,6 +5819,10 @@ struct LFNucleiBATask {
       }
       if (collision.selection_bit(aod::evsel::kNoITSROFrameBorder)) {
         for (const auto& mcParticle : particlesInCollision) {
+          if (mcParticle.y() > kinemOptions.yHighCut || mcParticle.y() < kinemOptions.yLowCut) {
+            continue;
+          }
+
           spectraGen.fill(HIST("LfEv/pT_ITSROFBorder"), mcParticle.pt());
           if (mcParticle.pdgCode() == PDGHelium) {
             spectraGen.fill(HIST("LfEv/helium/pT_ITSROFBorder_He"), mcParticle.pt());
@@ -4498,8 +5832,33 @@ struct LFNucleiBATask {
           }
         }
       }
+      if ((collision.selection_bit(aod::evsel::kIsTriggerTVX)) && (collision.selection_bit(aod::evsel::kNoTimeFrameBorder))) {
+        for (const auto& mcParticle : particlesInCollision) {
+          if (mcParticle.y() > kinemOptions.yHighCut || mcParticle.y() < kinemOptions.yLowCut) {
+            continue;
+          }
+
+          bool isPhysPrim = mcParticle.isPhysicalPrimary();
+
+          spectraGen.fill(HIST("LfEv/pT_MCsel8"), mcParticle.pt());
+          if (mcParticle.pdgCode() == PDGHelium) {
+            spectraGen.fill(HIST("LfEv/helium/pT_MCsel8_He"), mcParticle.pt());
+            if (isPhysPrim)
+              spectraGen.fill(HIST("LfEv/helium/pT_MCsel8_HePrim"), mcParticle.pt());
+          }
+          if (mcParticle.pdgCode() == -PDGHelium) {
+            spectraGen.fill(HIST("LfEv/helium/pT_MCsel8_antiHe"), mcParticle.pt());
+            if (isPhysPrim)
+              spectraGen.fill(HIST("LfEv/helium/pT_MCsel8_antiHePrim"), mcParticle.pt());
+          }
+        }
+      }
       if (collision.sel8()) {
         for (const auto& mcParticle : particlesInCollision) {
+          if (mcParticle.y() > kinemOptions.yHighCut || mcParticle.y() < kinemOptions.yLowCut) {
+            continue;
+          }
+
           spectraGen.fill(HIST("LfEv/pT_sel8"), mcParticle.pt());
           if (mcParticle.pdgCode() == PDGHelium) {
             spectraGen.fill(HIST("LfEv/helium/pT_sel8_He"), mcParticle.pt());
@@ -4517,14 +5876,16 @@ struct LFNucleiBATask {
 
   // Process function that runs on the filtered AO2D (for the MC)
   void processMCRecoFiltered(o2::aod::LfNuclEvents::iterator const& event,
-                             soa::Join<o2::aod::LfCandNucleusFull, o2::aod::LfCandNucleusMC> const& tracks)
+                             soa::Join<o2::aod::LfCandNucleusFull, o2::aod::LfCandNucleusMC> const& tracks,
+                             o2::aod::BCsWithTimestamps const&)
   {
     fillHistograms<true /*MC*/, true /*Filtered*/>(event, tracks, true /*dummy*/);
   } // CLOSING PROCESS MC RECO ON FILTERED DATA
   PROCESS_SWITCH(LFNucleiBATask, processMCRecoFiltered, "process mc reco on the filtered data", false);
 
   void processMCRecoFilteredLight(o2::aod::LfNuclEvents::iterator const& event,
-                                  soa::Join<o2::aod::LfCandNucleusDummy, o2::aod::LfCandNucleusMC> const& tracks)
+                                  soa::Join<o2::aod::LfCandNucleusDummy, o2::aod::LfCandNucleusMC> const& tracks,
+                                  o2::aod::BCsWithTimestamps const&)
   {
     fillHistograms<true /*MC*/, true /*Filtered*/>(event, tracks, true /*dummy*/);
   } // CLOSING PROCESS MC RECO ON FILTERED DATA
@@ -4540,17 +5901,13 @@ struct LFNucleiBATask {
   {
     spectraGen.fill(HIST("histGenVetxZ"), mcCollision.posZ());
     for (auto& mcParticleGen : mcParticles) {
-      if (mcParticleGen.y() > yHighCut || mcParticleGen.y() < yLowCut) {
+      if (mcParticleGen.y() > kinemOptions.yHighCut || mcParticleGen.y() < kinemOptions.yLowCut) {
         continue;
       }
 
       bool isPhysPrim = mcParticleGen.isPhysicalPrimary();
       bool isProdByGen = mcParticleGen.producedByGenerator();
       bool isWeakDecay = mcParticleGen.getProcess() == 4;
-
-      // if (mcParticleGen.pdgCode() == PDGHelium) {
-      //   LOG(info) << "I AM POSITIVE HELIUM, get process output is: " << mcParticleGen.getProcess();
-      // }
 
       if (mcParticleGen.pdgCode() == PDGPion) {
         spectraGen.fill(HIST("pion/histGenPtPion"), mcParticleGen.pt());

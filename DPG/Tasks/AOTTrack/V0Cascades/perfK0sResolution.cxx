@@ -9,6 +9,8 @@
 // granted to it by virtue of its status as an Intergovernmental Organization
 // or submit itself to any jurisdiction.
 
+#include <string>
+
 #include "Framework/runDataProcessing.h"
 #include "Framework/AnalysisTask.h"
 #include "Framework/AnalysisDataModel.h"
@@ -57,7 +59,9 @@ struct perfK0sResolution {
   Configurable<float> nV0lifetime{"nV0lifetime", 3., "n ctau"};
   Configurable<float> nMaxTPCNsigma{"nMaxTPCNsigma", 10., "Maximum TPC nsigma for pions"};
   Configurable<int> itsIbSelectionPos{"itsIbSelectionPos", 0, "Flag for the ITS IB selection on positive daughters: -1 no ITS IB, 0 no selection, 1 ITS IB"};
-  Configurable<int> itsIbSelectionNeg{"itsIbSelectionNeg", 0, "Flag for the ITS IB IB selection on negative daughters: -1 no ITS IB, 0 no selection, 1 ITS IB"};
+  Configurable<int> itsIbSelectionNeg{"itsIbSelectionNeg", 0, "Flag for the ITS IB selection on negative daughters: -1 no ITS IB, 0 no selection, 1 ITS IB"};
+  Configurable<int> itsAfterburnerPos{"itsAfterburnerPos", 0, "Flag for the ITS afterburner tracks on positive daughters: -1 no AB, 0 no selection, 1 AB"};
+  Configurable<int> itsAfterburnerNeg{"itsAfterburnerNeg", 0, "Flag for the ITS afterburner tracks on negative daughters: -1 no AB, 0 no selection, 1 AB"};
   Configurable<int> trdSelectionPos{"trdSelectionPos", 0, "Flag for the TRD selection on positive daughters: -1 no TRD, 0 no selection, 1 TRD"};
   Configurable<int> trdSelectionNeg{"trdSelectionNeg", 0, "Flag for the TRD selection on negative daughters: -1 no TRD, 0 no selection, 1 TRD"};
   Configurable<int> tofSelectionPos{"tofSelectionPos", 0, "Flag for the TOF selection on positive daughters: -1 no TOF, 0 no selection, 1 TOF"};
@@ -93,6 +97,8 @@ struct perfK0sResolution {
   Configurable<std::string> lutPath{"lutPath", "GLO/Param/MatLUT", "Path of the Lut parametrization"};
   Configurable<std::string> ccdburl{"ccdb-url", "http://alice-ccdb.cern.ch", "url of the ccdb repository"};
   Configurable<std::string> grpmagPath{"grpmagPath", "GLO/Config/GRPMagField", "CCDB path of the GRPMagField object"};
+  Configurable<int> minOccupancyCut{"minOccupancyCut", 1, "Minimum occupancy cut. Enabled if min < max"};
+  Configurable<int> maxOccupancyCut{"maxOccupancyCut", -1, "Maximum occupancy cut. Enabled if min < max"};
 
   int runNumber = -1;
 
@@ -248,15 +254,49 @@ struct perfK0sResolution {
         LOG(fatal) << "Invalid ITS selection for negative daughter";
         break;
     }
+    switch (itsAfterburnerPos) {
+      case -1:
+        if (ptrack.itsChi2NCl() >= 0) {
+          return false;
+        }
+        break;
+      case 0:
+        break;
+      case 1:
+        if (ptrack.itsChi2NCl() < 0) {
+          return false;
+        }
+        break;
+      default:
+        LOG(fatal) << "Invalid AB selection for positive daughter";
+        break;
+    }
+    switch (itsAfterburnerNeg) {
+      case -1:
+        if (ntrack.itsChi2NCl() >= 0) {
+          return false;
+        }
+        break;
+      case 0:
+        break;
+      case 1:
+        if (ntrack.itsChi2NCl() < 0) {
+          return false;
+        }
+        break;
+      default:
+        LOG(fatal) << "Invalid AB selection for negative daughter";
+        break;
+    }
 
     // TPC selection
     if (!ntrack.hasTPC() || !ptrack.hasTPC()) {
       return false;
     }
-    if (abs(ntrack.tpcNSigmaPi()) > nMaxTPCNsigma) {
+    if (std::abs(ntrack.tpcNSigmaPi()) > nMaxTPCNsigma) {
       return false;
     }
-    if (abs(ptrack.tpcNSigmaPi()) > nMaxTPCNsigma) {
+    if (std::abs(ptrack.tpcNSigmaPi()) > nMaxTPCNsigma) {
       return false;
     }
     if (ntrack.tpcNClsCrossedRows() < extraCutTPCClusters || ptrack.tpcNClsCrossedRows() < extraCutTPCClusters) {
@@ -385,6 +425,13 @@ struct perfK0sResolution {
                    soa::Filtered<aod::V0Datas> const& fullV0s,
                    PIDTracks const&)
   {
+    const int occupancy = collision.trackOccupancyInTimeRange();
+    if (minOccupancyCut < maxOccupancyCut) {
+      if (occupancy < minOccupancyCut || occupancy > maxOccupancyCut) {
+        return;
+      }
+    }
+
     rK0sResolution.fill(HIST("h1_stats"), 0.5);
     for (auto& v0 : fullV0s) {
       rK0sResolution.fill(HIST("h1_stats"), 1.5);

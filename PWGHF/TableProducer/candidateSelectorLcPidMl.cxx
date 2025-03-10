@@ -17,6 +17,10 @@
 /// \author Vít Kučera <vit.kucera@cern.ch>, CERN
 /// \author Maja Kabus <maja.kabus@cern.ch>, CERN, Warsaw University of Technology
 
+#include <map>
+#include <string>
+#include <vector>
+
 #include "CommonConstants/PhysicsConstants.h"
 #include "CCDB/CcdbApi.h"
 #include "Framework/AnalysisTask.h"
@@ -61,7 +65,7 @@ struct HfCandidateSelectorLcPidMl {
   // ONNX BDT
   Configurable<bool> applyML{"applyML", false, "Flag to enable or disable ML application"};
   Configurable<std::string> onnxFileLcToPiKPConf{"onnxFileLcToPiKPConf", "/cvmfs/alice.cern.ch/data/analysis/2022/vAN-20220818/PWGHF/o2/trigger/ModelHandler_onnx_LcToPKPi.onnx", "ONNX file for ML model for Lc+ candidates"};
-  Configurable<LabeledArray<double>> thresholdBDTScoreLcToPiKP{"thresholdBDTScoreLcToPiKP", {hf_cuts_bdt_multiclass::cuts[0], hf_cuts_bdt_multiclass::nBinsPt, hf_cuts_bdt_multiclass::nCutBdtScores, hf_cuts_bdt_multiclass::labelsPt, hf_cuts_bdt_multiclass::labelsCutBdt}, "Threshold values for BDT output scores of Lc+ candidates"};
+  Configurable<LabeledArray<double>> thresholdBDTScoreLcToPiKP{"thresholdBDTScoreLcToPiKP", {hf_cuts_bdt_multiclass::Cuts[0], hf_cuts_bdt_multiclass::NBinsPt, hf_cuts_bdt_multiclass::NCutBdtScores, hf_cuts_bdt_multiclass::labelsPt, hf_cuts_bdt_multiclass::labelsCutBdt}, "Threshold values for BDT output scores of Lc+ candidates"};
 
   Configurable<std::string> url{"ccdb-url", "http://alice-ccdb.cern.ch", "url of the ccdb repository"};
   Configurable<std::string> mlModelPathCCDB{"mlModelPathCCDB", "Analysis/PWGHF/ML/HFTrigger/Lc", "Path on CCDB"};
@@ -123,7 +127,15 @@ struct HfCandidateSelectorLcPidMl {
       }
       if (retrieveSuccess) {
         auto session = model.getSession();
+#if __has_include(<onnxruntime/core/session/onnxruntime_cxx_api.h>)
         auto inputShapes = session->GetInputShapes();
+#else
+        std::vector<std::vector<int64_t>> inputShapes;
+        Ort::AllocatorWithDefaultOptions tmpAllocator;
+        for (size_t i = 0; i < session->GetInputCount(); ++i) {
+          inputShapes.emplace_back(session->GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape());
+        }
+#endif
         if (inputShapes[0][0] < 0) {
           LOGF(warning, "Model for Lc with negative input shape likely because converted with hummingbird, setting it to 1.");
           inputShapes[0][0] = 1;

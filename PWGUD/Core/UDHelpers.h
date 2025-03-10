@@ -18,6 +18,7 @@
 
 #include <vector>
 #include <bitset>
+
 #include "TLorentzVector.h"
 #include "Framework/Logger.h"
 #include "DataFormatsFT0/Digit.h"
@@ -42,7 +43,7 @@ template <bool onlyPV, typename std::enable_if<onlyPV>::type* = nullptr, typenam
 int8_t netCharge(TCs tracks)
 {
   int8_t nch = 0;
-  for (auto track : tracks) {
+  for (const auto& track : tracks) {
     if (track.isPVContributor()) {
       nch += track.sign();
     }
@@ -55,7 +56,7 @@ template <bool onlyPV, typename std::enable_if<!onlyPV>::type* = nullptr, typena
 int8_t netCharge(TCs tracks)
 {
   int8_t nch = 0;
-  for (auto track : tracks) {
+  for (const auto& track : tracks) {
     nch += track.sign();
   }
   return nch;
@@ -67,7 +68,7 @@ template <bool onlyPV, typename std::enable_if<onlyPV>::type* = nullptr, typenam
 float rPVtrwTOF(TCs tracks, int nPVTracks)
 {
   float rpvrwTOF = 0.;
-  for (auto& track : tracks) {
+  for (const auto& track : tracks) {
     if (track.isPVContributor() && track.hasTOF()) {
       rpvrwTOF += 1.;
     }
@@ -83,7 +84,7 @@ template <bool onlyPV, typename std::enable_if<!onlyPV>::type* = nullptr, typena
 float rPVtrwTOF(TCs tracks, int nPVTracks)
 {
   float rpvrwTOF = 0.;
-  for (auto& track : tracks) {
+  for (const auto& track : tracks) {
     if (track.hasTOF()) {
       rpvrwTOF += 1.;
     }
@@ -101,29 +102,31 @@ float rPVtrwTOF(TCs tracks, int nPVTracks)
 // true BC.
 //
 template <typename T>
-T compatibleBCs(uint64_t meanBC, int deltaBC, T const& bcs);
+T compatibleBCs(uint64_t const& meanBC, int const& deltaBC, T const& bcs);
 
-template <typename I, typename T>
-T compatibleBCs(I& bcIter, uint64_t meanBC, int deltaBC, T const& bcs);
+template <typename B, typename T>
+T compatibleBCs(B const& bc, uint64_t const& meanBC, int const& deltaBC, T const& bcs);
 
 // In this variant of compatibleBCs the bcIter is ideally placed within
 // [minBC, maxBC], but it does not need to be. The range is given by meanBC +- delatBC.
-template <typename I, typename T>
-T compatibleBCs(I& bcIter, uint64_t meanBC, int deltaBC, T const& bcs)
+template <typename B, typename T>
+T compatibleBCs(B const& bc, uint64_t const& meanBC, int const& deltaBC, T const& bcs)
 {
+  // get BCs iterator
+  auto bcIter = bcs.iteratorAt(bc.globalIndex());
+
   // range of BCs to consider
-  uint64_t minBC = (uint64_t)deltaBC < meanBC ? meanBC - (uint64_t)deltaBC : 0;
-  uint64_t maxBC = meanBC + (uint64_t)deltaBC;
-  LOGF(debug, "  minBC %d maxBC %d bcIterator %d (%d)", minBC, maxBC, bcIter.globalBC(), bcIter.globalIndex());
+  uint64_t minBC = static_cast<uint64_t>(deltaBC) < meanBC ? meanBC - static_cast<uint64_t>(deltaBC) : 0;
+  uint64_t maxBC = meanBC + static_cast<uint64_t>(deltaBC);
+  LOGF(debug, "  minBC %d maxBC %d bcIterator %d (%d) #BCs %d", minBC, maxBC, bcIter.globalBC(), bcIter.globalIndex(), bcs.size());
 
   // check [min,max]BC to overlap with [bcs.iteratorAt([0,bcs.size() - 1])
   if (maxBC < bcs.iteratorAt(0).globalBC() || minBC > bcs.iteratorAt(bcs.size() - 1).globalBC()) {
     LOGF(debug, "<compatibleBCs> No overlap of [%d, %d] and [%d, %d]", minBC, maxBC, bcs.iteratorAt(0).globalBC(), bcs.iteratorAt(bcs.size() - 1).globalBC());
-    return T{{bcs.asArrowTable()->Slice(0, 0)}, (uint64_t)0};
+    return T{{bcs.asArrowTable()->Slice(0, 0)}, static_cast<uint64_t>(0)};
   }
 
   // find slice of BCs table with BC in [minBC, maxBC]
-  int moveCount = 0;
   int64_t minBCId = bcIter.globalIndex();
   int64_t maxBCId = bcIter.globalIndex();
 
@@ -131,14 +134,12 @@ T compatibleBCs(I& bcIter, uint64_t meanBC, int deltaBC, T const& bcs)
   if (bcIter.globalBC() < minBC) {
     while (bcIter != bcs.end() && bcIter.globalBC() < minBC) {
       ++bcIter;
-      ++moveCount;
       minBCId = bcIter.globalIndex();
     }
   } else {
     while (bcIter.globalIndex() > 0 && bcIter.globalBC() >= minBC) {
       minBCId = bcIter.globalIndex();
       --bcIter;
-      --moveCount;
     }
   }
 
@@ -147,26 +148,19 @@ T compatibleBCs(I& bcIter, uint64_t meanBC, int deltaBC, T const& bcs)
     while (bcIter != bcs.end() && bcIter.globalBC() <= maxBC) {
       maxBCId = bcIter.globalIndex();
       ++bcIter;
-      ++moveCount;
     }
-
   } else {
     while (bcIter.globalIndex() > 0 && bcIter.globalBC() > maxBC) {
       --bcIter;
-      --moveCount;
       maxBCId = bcIter.globalIndex();
     }
   }
-  LOGF(debug, "  BC range: %d - %d", minBCId, maxBCId);
-
-  // reset bcIter
-  bcIter.moveByIndex(-moveCount);
 
   // create bc slice
-  T slice{{bcs.asArrowTable()->Slice(minBCId, maxBCId - minBCId + 1)}, (uint64_t)minBCId};
-  bcs.copyIndexBindings(slice);
-  LOGF(debug, "  size of slice %d", slice.size());
-  return slice;
+  T bcslice{{bcs.asArrowTable()->Slice(minBCId, maxBCId - minBCId + 1)}, static_cast<uint64_t>(minBCId)};
+  bcs.copyIndexBindings(bcslice);
+  LOGF(debug, "  size of slice %d", bcslice.size());
+  return bcslice;
 }
 
 // In this variant of compatibleBCs the range of compatible BCs is calculated from the
@@ -178,7 +172,7 @@ T compatibleBCs(C const& collision, int ndt, T const& bcs, int nMinBCs = 7)
 
   // return if collisions has no associated BC
   if (!collision.has_foundBC() || ndt < 0) {
-    return T{{bcs.asArrowTable()->Slice(0, 0)}, (uint64_t)0};
+    return T{{bcs.asArrowTable()->Slice(0, 0)}, static_cast<uint64_t>(0)};
   }
 
   // get associated BC
@@ -200,10 +194,10 @@ T compatibleBCs(C const& collision, int ndt, T const& bcs, int nMinBCs = 7)
 
 // In this variant of compatibleBCs the range of compatible BCs is defined by meanBC +- deltaBC.
 template <typename T>
-T compatibleBCs(uint64_t meanBC, int deltaBC, T const& bcs)
+T compatibleBCs(uint64_t const& meanBC, int const& deltaBC, T const& bcs)
 {
   // find BC with globalBC ~ meanBC
-  uint64_t ind = (uint64_t)(bcs.size() / 2);
+  uint64_t ind = static_cast<uint64_t>(bcs.size() / 2);
   auto bcIter = bcs.iteratorAt(ind);
 
   return compatibleBCs(bcIter, meanBC, deltaBC, bcs);
@@ -212,14 +206,14 @@ T compatibleBCs(uint64_t meanBC, int deltaBC, T const& bcs)
 // -----------------------------------------------------------------------------
 // Same as above but for collisions with MC information
 template <typename F, typename T>
-T MCcompatibleBCs(F const& collision, int ndt, T const& bcs, int nMinBCs = 7)
+T MCcompatibleBCs(F const& collision, int const& ndt, T const& bcs, int const& nMinBCs = 7)
 {
   LOGF(debug, "Collision time / resolution [ns]: %f / %f", collision.collisionTime(), collision.collisionTimeRes());
 
   // return if collisions has no associated BC
   if (!collision.has_foundBC()) {
-    LOGF(info, "Collision %i - no BC found!", collision.globalIndex());
-    return T{{bcs.asArrowTable()->Slice(0, 0)}, (uint64_t)0};
+    LOGF(debug, "Collision %i - no BC found!", collision.globalIndex());
+    return T{{bcs.asArrowTable()->Slice(0, 0)}, static_cast<uint64_t>(0)};
   }
 
   // get associated BC
@@ -252,19 +246,19 @@ bool hasGoodPID(DGCutparHolder diffCuts, TC track)
        track.tpcNSigmaPi(),
        track.tpcNSigmaKa(),
        track.tpcNSigmaPr());
-  if (TMath::Abs(track.tpcNSigmaEl()) < diffCuts.maxNSigmaTPC()) {
+  if (std::abs(track.tpcNSigmaEl()) < diffCuts.maxNSigmaTPC()) {
     return true;
   }
-  if (TMath::Abs(track.tpcNSigmaMu()) < diffCuts.maxNSigmaTPC()) {
+  if (std::abs(track.tpcNSigmaMu()) < diffCuts.maxNSigmaTPC()) {
     return true;
   }
-  if (TMath::Abs(track.tpcNSigmaPi()) < diffCuts.maxNSigmaTPC()) {
+  if (std::abs(track.tpcNSigmaPi()) < diffCuts.maxNSigmaTPC()) {
     return true;
   }
-  if (TMath::Abs(track.tpcNSigmaKa()) < diffCuts.maxNSigmaTPC()) {
+  if (std::abs(track.tpcNSigmaKa()) < diffCuts.maxNSigmaTPC()) {
     return true;
   }
-  if (TMath::Abs(track.tpcNSigmaPr()) < diffCuts.maxNSigmaTPC()) {
+  if (std::abs(track.tpcNSigmaPr()) < diffCuts.maxNSigmaTPC()) {
     return true;
   }
 
@@ -275,19 +269,19 @@ bool hasGoodPID(DGCutparHolder diffCuts, TC track)
          track.tofNSigmaPi(),
          track.tofNSigmaKa(),
          track.tofNSigmaPr());
-    if (TMath::Abs(track.tofNSigmaEl()) < diffCuts.maxNSigmaTOF()) {
+    if (std::abs(track.tofNSigmaEl()) < diffCuts.maxNSigmaTOF()) {
       return true;
     }
-    if (TMath::Abs(track.tofNSigmaMu()) < diffCuts.maxNSigmaTOF()) {
+    if (std::abs(track.tofNSigmaMu()) < diffCuts.maxNSigmaTOF()) {
       return true;
     }
-    if (TMath::Abs(track.tofNSigmaPi()) < diffCuts.maxNSigmaTOF()) {
+    if (std::abs(track.tofNSigmaPi()) < diffCuts.maxNSigmaTOF()) {
       return true;
     }
-    if (TMath::Abs(track.tofNSigmaKa()) < diffCuts.maxNSigmaTOF()) {
+    if (std::abs(track.tofNSigmaKa()) < diffCuts.maxNSigmaTOF()) {
       return true;
     }
-    if (TMath::Abs(track.tofNSigmaPr()) < diffCuts.maxNSigmaTOF()) {
+    if (std::abs(track.tofNSigmaPr()) < diffCuts.maxNSigmaTOF()) {
       return true;
     }
   }
@@ -589,11 +583,31 @@ bool cutIsGoodZvtxFT0vsPV(T const& coll)
 
 template <typename T>
 bool cutIsVertexITSTPC(T const& coll)
-// Selects collisions with at least one ITS-TPC track, and thus rejects vertices built from ITS-only tracks.
+// Selects collisions with at least one ITS-TPC PV track, and thus rejects vertices built from ITS-only tracks.
 // Has an effect only on the pp data, in Pb-Pb ITS-only vertices are already rejected by default.
 // Return true when event is good.
 {
   return coll.selection_bit(o2::aod::evsel::kIsVertexITSTPC);
+}
+
+// -----------------------------------------------------------------------------
+
+template <typename T>
+bool cutIsVertexTRDmatched(T const& coll)
+// Selects collisions with at least one TRD PV track.
+// Return true when event is good.
+{
+  return coll.selection_bit(o2::aod::evsel::kIsVertexTRDmatched);
+}
+
+// -----------------------------------------------------------------------------
+
+template <typename T>
+bool cutIsVertexTOFmatched(T const& coll)
+// Selects collisions with at least one TOF PV track.
+// Return true when event is good.
+{
+  return coll.selection_bit(o2::aod::evsel::kIsVertexTOFmatched);
 }
 
 // -----------------------------------------------------------------------------
@@ -605,15 +619,19 @@ bool goodCollision(T const& coll, DGCutparHolder const& diffCuts)
   bool accepted = true;
   std::vector<int> sels = diffCuts.collisionSel();
   if (sels[0])
-    accepted = cutNoTimeFrameBorder(coll);
+    accepted = accepted && cutNoTimeFrameBorder(coll);
   if (sels[1])
-    accepted = cutNoSameBunchPileup(coll);
+    accepted = accepted && cutNoSameBunchPileup(coll);
   if (sels[2])
-    accepted = cutNoITSROFrameBorder(coll);
+    accepted = accepted && cutNoITSROFrameBorder(coll);
   if (sels[3])
-    accepted = cutIsGoodZvtxFT0vsPV(coll);
+    accepted = accepted && cutIsGoodZvtxFT0vsPV(coll);
   if (sels[4])
-    accepted = cutIsVertexITSTPC(coll);
+    accepted = accepted && cutIsVertexITSTPC(coll);
+  if (sels[5])
+    accepted = accepted && cutIsVertexTRDmatched(coll);
+  if (sels[6])
+    accepted = accepted && cutIsVertexTOFmatched(coll);
 
   return accepted;
 }
@@ -627,6 +645,9 @@ void fillBGBBFlags(upchelpers::FITInfo& info, uint64_t const& minbc, BCR const& 
 
     // 0 <= bit <= 31
     auto bit = bc.globalBC() - minbc;
+    if (bit < 0 || bit > 31)
+      continue;
+
     if (!bc.selection_bit(o2::aod::evsel::kNoBGT0A))
       SETBIT(info.BGFT0Apf, bit);
     if (!bc.selection_bit(o2::aod::evsel::kNoBGT0C))
@@ -652,52 +673,42 @@ void fillBGBBFlags(upchelpers::FITInfo& info, uint64_t const& minbc, BCR const& 
 
 // -----------------------------------------------------------------------------
 // extract FIT information
-template <typename B>
-void getFITinfo(upchelpers::FITInfo& info, uint64_t const& bcnum, B const& bcs, aod::FT0s const& ft0s, aod::FV0As const& fv0as, aod::FDDs const& fdds)
+template <typename BC, typename BCS>
+void getFITinfo(upchelpers::FITInfo& info, BC& bc, BCS const& bcs, aod::FT0s const& ft0s, aod::FV0As const& fv0as, aod::FDDs const& fdds)
 {
-  // find bc with globalBC = bcnum
-  Partition<B> selbc = aod::bc::globalBC == bcnum;
-  selbc.bindTable(bcs);
+  // FV0A
+  if (bc.has_foundFV0()) {
+    auto fv0 = fv0as.iteratorAt(bc.foundFV0Id());
+    info.timeFV0A = fv0.time();
+    info.ampFV0A = FV0AmplitudeA(fv0);
+    info.triggerMaskFV0A = fv0.triggerMask();
+  }
 
-  // if BC exists then update FIT information for this BC
-  if (selbc.size() > 0) {
-    auto bc = selbc.begin();
+  // FT0
+  if (bc.has_foundFT0()) {
+    auto ft0 = ft0s.iteratorAt(bc.foundFT0Id());
+    info.timeFT0A = ft0.timeA();
+    info.timeFT0C = ft0.timeC();
+    info.ampFT0A = FT0AmplitudeA(ft0);
+    info.ampFT0C = FT0AmplitudeC(ft0);
+    info.triggerMaskFT0 = ft0.triggerMask();
+  }
 
-    // FV0A
-    if (bc.has_foundFV0()) {
-      auto fv0 = fv0as.iteratorAt(bc.foundFV0Id());
-      info.timeFV0A = fv0.time();
-      info.ampFV0A = FV0AmplitudeA(fv0);
-      info.triggerMaskFV0A = fv0.triggerMask();
-    }
-
-    // FT0
-    if (bc.has_foundFT0()) {
-      auto ft0 = ft0s.iteratorAt(bc.foundFT0Id());
-      info.timeFT0A = ft0.timeA();
-      info.timeFT0C = ft0.timeC();
-      info.ampFT0A = FT0AmplitudeA(ft0);
-      info.ampFT0C = FT0AmplitudeC(ft0);
-      info.triggerMaskFT0 = ft0.triggerMask();
-    }
-
-    // FDD
-    if (bc.has_foundFDD()) {
-      auto fdd = fdds.iteratorAt(bc.foundFDDId());
-      info.timeFDDA = fdd.timeA();
-      info.timeFDDC = fdd.timeC();
-      info.ampFDDA = FDDAmplitudeA(fdd);
-      info.ampFDDC = FDDAmplitudeC(fdd);
-      info.triggerMaskFDD = fdd.triggerMask();
-    }
+  // FDD
+  if (bc.has_foundFDD()) {
+    auto fdd = fdds.iteratorAt(bc.foundFDDId());
+    info.timeFDDA = fdd.timeA();
+    info.timeFDDC = fdd.timeC();
+    info.ampFDDA = FDDAmplitudeA(fdd);
+    info.ampFDDC = FDDAmplitudeC(fdd);
+    info.triggerMaskFDD = fdd.triggerMask();
   }
 
   // fill BG and BB flags
-  auto minbc = bcnum - 16;
-  auto maxbc = bcnum + 15;
-  Partition<B> bcrange = aod::bc::globalBC >= minbc && aod::bc::globalBC <= maxbc;
-  bcrange.bindTable(bcs);
-  fillBGBBFlags(info, minbc, bcrange);
+  auto bcnum = bc.globalBC();
+  auto bcrange = compatibleBCs(bc, bcnum, 16, bcs);
+  LOGF(debug, "size of bcrange %d", bcrange.size());
+  fillBGBBFlags(info, bcnum - 16, bcrange);
 }
 
 // -----------------------------------------------------------------------------
@@ -719,7 +730,7 @@ bool cleanCalo(T const& bc, aod::Calos& calos, std::vector<float>& /*lims*/, Sli
 // -----------------------------------------------------------------------------
 // check if all tracks come from same MCCollision
 template <typename T>
-int64_t sameMCCollision(T tracks, aod::McCollisions mccols, aod::McParticles mcparts)
+int64_t sameMCCollision(T tracks, aod::McCollisions, aod::McParticles)
 {
   int64_t colID = -1;
   for (auto const& track : tracks) {
@@ -731,14 +742,14 @@ int64_t sameMCCollision(T tracks, aod::McCollisions mccols, aod::McParticles mcp
           colID = mccol.globalIndex();
         } else {
           if (colID != mccol.globalIndex()) {
-            return (int64_t)-1;
+            return static_cast<int64_t>(-1);
           }
         }
       } else {
-        return (int64_t)-1;
+        return static_cast<int64_t>(-1);
       }
     } else {
-      return (int64_t)-1;
+      return static_cast<int64_t>(-1);
     }
   }
 
@@ -751,7 +762,7 @@ int64_t sameMCCollision(T tracks, aod::McCollisions mccols, aod::McParticles mcp
 template <typename T>
 bool isPythiaCDE(T MCparts)
 {
-  for (auto mcpart : MCparts) {
+  for (const auto& mcpart : MCparts) {
     if (mcpart.pdgCode() == 9900110) {
       return true;
     }
@@ -770,7 +781,7 @@ bool isSTARLightJPsimumu(T MCparts)
   } else {
     if (MCparts.iteratorAt(0).pdgCode() != 443013)
       return false;
-    if (abs(MCparts.iteratorAt(1).pdgCode()) != 13)
+    if (std::abs(MCparts.iteratorAt(1).pdgCode()) != 13)
       return false;
     if (MCparts.iteratorAt(2).pdgCode() != -MCparts.iteratorAt(1).pdgCode())
       return false;
@@ -779,33 +790,46 @@ bool isSTARLightJPsimumu(T MCparts)
 }
 
 // -----------------------------------------------------------------------------
+// PbPb di electron production
+// [15, 11, 13], [15, 11, 13]
+template <typename T>
+bool isUpcgen(T MCparts)
+{
+  if (MCparts.size() < 4) {
+    return false;
+  } else {
+    auto pid1 = std::abs(MCparts.iteratorAt(0).pdgCode());
+    auto pid2 = std::abs(MCparts.iteratorAt(1).pdgCode());
+    if (pid1 != 11 && pid1 != 13 && pid1 != 15)
+      return false;
+    if (pid2 != 11 && pid2 != 13 && pid2 != 15)
+      return false;
+  }
+  return true;
+}
+
+// -----------------------------------------------------------------------------
 // In pp events produced with GRANIITTI the stack starts with
-// 22212/22212/99/22212/2212/99/90
+// 22212/22212/22212/2212/[211,321,]/[211,321,]
 template <typename T>
 bool isGraniittiCDE(T MCparts)
 {
 
-  for (auto MCpart : MCparts) {
-    LOGF(debug, " MCpart.pdgCode() %d", MCpart.pdgCode());
-  }
-  LOGF(debug, "");
+  // for (auto MCpart : MCparts) {
+  //   LOGF(info, " MCpart.pdgCode() %d", MCpart.pdgCode());
+  // }
+  // LOGF(debug, "");
 
-  if (MCparts.size() < 7) {
+  if (MCparts.size() < 6) {
     return false;
   } else {
     if (MCparts.iteratorAt(0).pdgCode() != 2212)
       return false;
     if (MCparts.iteratorAt(1).pdgCode() != 2212)
       return false;
-    if (MCparts.iteratorAt(2).pdgCode() != 99)
+    if (MCparts.iteratorAt(2).pdgCode() != 2212)
       return false;
     if (MCparts.iteratorAt(3).pdgCode() != 2212)
-      return false;
-    if (MCparts.iteratorAt(4).pdgCode() != 2212)
-      return false;
-    if (MCparts.iteratorAt(5).pdgCode() != 99)
-      return false;
-    if (MCparts.iteratorAt(6).pdgCode() != 90)
       return false;
   }
 
@@ -831,6 +855,11 @@ int isOfInterest(T MCparts)
   // STARLIGHT J/Psi -> mu+ + mu-
   if (isSTARLightJPsimumu(MCparts)) {
     return 3;
+  }
+
+  // Upcgen
+  if (isUpcgen(MCparts)) {
+    return 4;
   }
 
   return 0;

@@ -24,10 +24,18 @@
 //    david.dobrigkeit.chinellato@cern.ch
 //
 
-#include <Math/Vector4D.h>
 #include <cmath>
 #include <array>
 #include <cstdlib>
+#include <vector>
+
+#include "Math/Vector4D.h"
+#include <TFile.h>
+#include <TLorentzVector.h>
+#include <TH1F.h>
+#include <TH2F.h>
+#include <TProfile.h>
+#include <TPDGCode.h>
 
 #include "Framework/runDataProcessing.h"
 #include "Framework/AnalysisTask.h"
@@ -50,14 +58,6 @@
 #include "CommonConstants/PhysicsConstants.h"
 #include "PWGMM/Mult/DataModel/Index.h" // for Particles2Tracks table
 
-#include <TFile.h>
-#include <TLorentzVector.h>
-#include <TH1F.h>
-#include <TH2F.h>
-#include <TProfile.h>
-#include <TPDGCode.h>
-#include <TDatabasePDG.h>
-
 using namespace o2;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
@@ -68,7 +68,7 @@ using LabeledTracks = soa::Join<aod::TracksIU, aod::TracksExtra, aod::McTrackLab
 using FullMcParticles = soa::Join<aod::McParticles, aod::ParticlesToTracks>;
 
 struct lambdakzeromcfinder {
-  Produces<aod::V0s> v0;
+  Produces<aod::FindableV0s> v0;
   Produces<aod::McFullV0Labels> fullv0labels;
 
   HistogramRegistry histos{"Histos", {}, OutputObjHandlingPolicy::AnalysisObject};
@@ -83,7 +83,8 @@ struct lambdakzeromcfinder {
   Configurable<bool> requireTPC{"requireTPC", true, "require TPC"};
   Configurable<bool> skipTPConly{"skipTPConly", false, "skip tracks that are TPC-only"};
   Configurable<bool> storeSingleTPCOnlyProng{"storeSingleTPCOnlyProng", false, "in case a TPC-only track is found, do not allow another TPC-only for the same mcParticle. Works only in MC particle path."};
-  Configurable<bool> doUnassociatedV0s{"doUnassociatedV0s", true, "generate also unassociated V0s (for cascades!)"};
+  Configurable<bool> doAssociatedV0s{"doAssociatedV0s", true, "generate collision-associated V0s (for cascades!)"};
+  Configurable<bool> doUnassociatedV0s{"doUnassociatedV0s", true, "generate also unassociated V0s (for cascades, UPC)"};
   Configurable<bool> doSameCollisionOnly{"doSameCollisionOnly", false, "stick to decays in which tracks are assoc to same collision"};
   Configurable<int> qaNbins{"qaNbins", 200, "qa plots: binning"};
   Configurable<float> yPreFilter{"yPreFilter", 2.5, "broad y pre-filter for speed"};
@@ -108,6 +109,9 @@ struct lambdakzeromcfinder {
     const AxisSpec axisNTimesRecoed{static_cast<int>(10), -0.5f, +9.5f, ""};
 
     histos.add("hNTimesCollRecoed", "hNTimesCollRecoed", kTH1F, {axisNTimesRecoed});
+
+    // store number of recoed V0s and number of recoed V0s with no collision association
+    histos.add("hNCollisionAssociation", "hNCollisionAssociation", kTH1F, {axisNTimesRecoed});
 
     // warning: this stores (composite) number of copies of tracks
     histos.add("hNTimesRecoedGamma", "hNTimesRecoedGamma", kTH2F, {axisNTimesRecoed, axisPtQA});
@@ -178,15 +182,16 @@ struct lambdakzeromcfinder {
   {
     int nPosReco = 0;
     int nNegReco = 0;
-    const int maxReco = 20;
-    int trackIndexPositive[maxReco];
-    int trackIndexNegative[maxReco];
+    std::vector<int> trackIndexPositive;
+    std::vector<int> trackIndexNegative;
 
     int positivePdg = 211;
     int negativePdg = -211;
+    int relevantProcess = 4; // normal search: decay
     if (mcParticle.pdgCode() == 22) {
       positivePdg = -11;
       negativePdg = +11;
+      relevantProcess = 5; // look for pair production if photon
     }
     if (mcParticle.pdgCode() == 3122) {
       positivePdg = 2212;
@@ -205,7 +210,7 @@ struct lambdakzeromcfinder {
       auto const& daughters = mcParticle.template daughters_as<FullMcParticles>();
       if (daughters.size() >= 2) {
         for (auto const& daughter : daughters) { // might be better ways of doing this but ok
-          if (daughter.getProcess() != 4)
+          if (daughter.getProcess() != relevantProcess)
             continue; // skip deltarays (if ever), stick to decay products only
           if (daughter.pdgCode() == positivePdg) {
             auto const& thisDaughterTracks = daughter.template tracks_as<LabeledTracks>();
@@ -219,7 +224,7 @@ struct lambdakzeromcfinder {
                 tpcOnlyFound = true;
               }
               if (track.sign() > 0 && (track.hasTPC() || !requireTPC)) {
-                trackIndexPositive[nPosReco] = track.globalIndex(); // assign only if TPC present
+                trackIndexPositive.push_back(track.globalIndex()); // assign only if TPC present
                 nPosReco++;
               }
             } // end track list loop
@@ -236,7 +241,7 @@ struct lambdakzeromcfinder {
                 tpcOnlyFound = true;
               }
               if (track.sign() < 0 && (track.hasTPC() || !requireTPC)) {
-                trackIndexNegative[nNegReco] = track.globalIndex(); // assign only if TPC present
+                trackIndexNegative.push_back(track.globalIndex()); // assign only if TPC present
                 nNegReco++;
               }
             } // end track list loop
@@ -301,7 +306,15 @@ struct lambdakzeromcfinder {
 
     // V0 list established, populate
     for (auto ic : sortedIndices) {
-      if (v0collisionId[ic] >= 0 || doUnassociatedV0s) {
+      histos.fill(HIST("hNCollisionAssociation"), 0.0f); // any correctly recoed
+      if (v0collisionId[ic] >= 0)
+        histos.fill(HIST("hNCollisionAssociation"), 1.0f); // reconstructed with a collision associated to it
+
+      if (v0collisionId[ic] < 0 && doUnassociatedV0s) {
+        v0(v0collisionId[ic], v0positiveIndex[ic], v0negativeIndex[ic], 1);
+        fullv0labels(v0mcLabel[ic]);
+      }
+      if (v0collisionId[ic] >= 0 && doAssociatedV0s) {
         v0(v0collisionId[ic], v0positiveIndex[ic], v0negativeIndex[ic], 1);
         fullv0labels(v0mcLabel[ic]);
       }
@@ -338,7 +351,7 @@ struct lambdakzeromcfinder {
         continue; // skip particles without decay mothers
       for (auto& posMotherParticle : posParticle.mothers_as<aod::McParticles>()) {
         // determine if mother particle satisfies any condition curently being searched for
-        for (int ipdg = 0; ipdg < searchedV0PDG.size(); ipdg++)
+        for (std::size_t ipdg = 0; ipdg < searchedV0PDG.size(); ipdg++)
           if (searchedV0PDG[ipdg] == posMotherParticle.pdgCode() && fabs(posMotherParticle.y()) < yPreFilter) {
             v0pdgIndex = ipdg; // index mapping to desired V0 species
             motherIndex = posMotherParticle.globalIndex();

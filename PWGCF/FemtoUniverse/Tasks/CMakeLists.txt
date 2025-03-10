@@ -29,8 +29,18 @@ o2physics_add_dpl_workflow(femtouniverse-pair-track-track-mult-kt-extended
           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
           COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(femtouniverse-pair-track-nucleus
+          SOURCES femtoUniversePairTaskTrackNucleus.cxx
+          PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+          COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(femtouniverse-pair-track-track-threedrelmom-mult-kt-extended
           SOURCES femtoUniversePairTaskTrackTrack3DMultKtExtended.cxx
+          PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+          COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(o2-analysis-cf-femtouniverse-pair-track-track-spherhar-mult-kt-extended
+          SOURCES femtoUniversePairTaskTrackTrackSpherHarMultKtExtended.cxx
           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
           COMPONENT_NAME Analysis)
 
@@ -41,6 +51,11 @@ o2physics_add_dpl_workflow(femtouniverse-debug-track
 
 o2physics_add_dpl_workflow(femtouniverse-pair-track-v0-extended
           SOURCES femtoUniversePairTaskTrackV0Extended.cxx
+          PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+          COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(femtouniverse-pair-track-cascade-extended
+          SOURCES femtoUniversePairTaskTrackCascadeExtended.cxx
           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
           COMPONENT_NAME Analysis)
 
@@ -74,10 +89,12 @@ o2physics_add_dpl_workflow(femtouniverse-efficiency-task
           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
           COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(femtouniverse-efficiency-base
+          SOURCES femtoUniverseEfficiencyBase.cxx
+          PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+          COMPONENT_NAME Analysis)
+
 o2physics_add_executable(femtouniverse-cutculator
           SOURCES femtoUniverseCutCulator.cxx
           PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
           COMPONENT_NAME Analysis)
-
-
-

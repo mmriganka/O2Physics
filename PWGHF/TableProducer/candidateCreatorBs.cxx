@@ -15,6 +15,10 @@
 ///
 /// \author Phil Stahlhut <phil.lennart.stahlhut@cern.ch>
 
+#include <string>
+#include <memory>
+#include <vector>
+
 #include "CommonConstants/PhysicsConstants.h"
 #include "DCAFitter/DCAFitterN.h"
 #include "Framework/AnalysisTask.h"
@@ -41,7 +45,8 @@ using namespace o2::hf_trkcandsel;
 
 /// Reconstruction of Bs candidates
 struct HfCandidateCreatorBs {
-  Produces<aod::HfCandBsBase> rowCandidateBase; // table defined in CandidateReconstructionTables.h
+  Produces<aod::HfCandBsBase> rowCandidateBase;     // table defined in CandidateReconstructionTables.h
+  Produces<aod::HfCandBsProngs> rowCandidateProngs; // table defined in CandidateReconstructionTables.h
 
   // vertexing
   Configurable<bool> propagateToPCA{"propagateToPCA", true, "create tracks version propagated to PCA"};
@@ -56,7 +61,7 @@ struct HfCandidateCreatorBs {
   Configurable<bool> usePionIsGlobalTrackWoDCA{"usePionIsGlobalTrackWoDCA", true, "check isGlobalTrackWoDCA status for pions, for Run3 studies"};
   Configurable<double> ptPionMin{"ptPionMin", 0.5, "minimum pion pT threshold (GeV/c)"};
   Configurable<std::vector<double>> binsPtPion{"binsPtPion", std::vector<double>{hf_cuts_single_track::vecBinsPtTrack}, "track pT bin limits for pion DCA XY pT-dependent cut"};
-  Configurable<LabeledArray<double>> cutsTrackPionDCA{"cutsTrackPionDCA", {hf_cuts_single_track::cutsTrack[0], hf_cuts_single_track::nBinsPtTrack, hf_cuts_single_track::nCutVarsTrack, hf_cuts_single_track::labelsPtTrack, hf_cuts_single_track::labelsCutVarTrack}, "Single-track selections per pT bin for pions"};
+  Configurable<LabeledArray<double>> cutsTrackPionDCA{"cutsTrackPionDCA", {hf_cuts_single_track::CutsTrack[0], hf_cuts_single_track::NBinsPtTrack, hf_cuts_single_track::NCutVarsTrack, hf_cuts_single_track::labelsPtTrack, hf_cuts_single_track::labelsCutVarTrack}, "Single-track selections per pT bin for pions"};
   Configurable<double> invMassWindowBs{"invMassWindowBs", 0.3, "invariant-mass window for Bs candidates"};
   Configurable<int> selectionFlagDs{"selectionFlagDs", 1, "Selection Flag for Ds"};
   // magnetic field setting from CCDB
@@ -88,6 +93,9 @@ struct HfCandidateCreatorBs {
   Preslice<CandsDsFiltered> candsDsPerCollision = aod::track_association::collisionId;
   Preslice<aod::TrackAssoc> trackIndicesPerCollision = aod::track_association::collisionId;
 
+  std::shared_ptr<TH1> hCandidatesD, hCandidatesB;
+  HistogramRegistry registry{"registry"};
+
   OutputObj<TH1F> hMassDsToKKPi{TH1F("hMassDsToKKPi", "D_{s} candidates;inv. mass (K K #pi) (GeV/#it{c}^{2});entries", 500, 0., 5.)};
   OutputObj<TH1F> hPtDs{TH1F("hPtDs", "D_{s} candidates;D_{s} candidate #it{p}_{T} (GeV/#it{c});entries", 100, 0., 10.)};
   OutputObj<TH1F> hPtPion{TH1F("hPtPion", "#pi candidates;#pi candidate #it{p}_{T} (GeV/#it{c});entries", 100, 0., 10.)};
@@ -95,9 +103,6 @@ struct HfCandidateCreatorBs {
   OutputObj<TH1F> hMassBsToDsPi{TH1F("hMassBsToDsPi", "2-prong candidates;inv. mass (B_{s} #rightarrow D_{s}#pi #rightarrow KK#pi#pi) (GeV/#it{c}^{2});entries", 500, 3., 8.)};
   OutputObj<TH1F> hCovPVXX{TH1F("hCovPVXX", "2-prong candidates;XX element of cov. matrix of prim. vtx. position (cm^{2});entries", 100, 0., 1.e-4)};
   OutputObj<TH1F> hCovSVXX{TH1F("hCovSVXX", "2-prong candidates;XX element of cov. matrix of sec. vtx. position (cm^{2});entries", 100, 0., 0.2)};
-
-  std::shared_ptr<TH1> hCandidatesD, hCandidatesB;
-  HistogramRegistry registry{"registry"};
 
   void init(InitContext const&)
   {
@@ -221,7 +226,7 @@ struct HfCandidateCreatorBs {
             continue;
           }
         } catch (const std::runtime_error& error) {
-          LOG(info) << "Run time error found: " << error.what() << ". DCFitterN for D cannot work, skipping the candidate.";
+          LOG(info) << "Run time error found: " << error.what() << ". DCAFitterN for D cannot work, skipping the candidate.";
           hCandidatesD->Fill(SVFitting::Fail);
           continue;
         }
@@ -284,7 +289,7 @@ struct HfCandidateCreatorBs {
               continue;
             }
           } catch (const std::runtime_error& error) {
-            LOG(info) << "Run time error found: " << error.what() << ". DCFitterN for B cannot work, skipping the candidate.";
+            LOG(info) << "Run time error found: " << error.what() << ". DCAFitterN for B cannot work, skipping the candidate.";
             hCandidatesB->Fill(SVFitting::Fail);
             continue;
           }
@@ -320,8 +325,6 @@ struct HfCandidateCreatorBs {
           auto errorDecayLength = std::sqrt(getRotatedCovMatrixXX(covMatrixPV, phi, theta) + getRotatedCovMatrixXX(covMatrixPCA, phi, theta));
           auto errorDecayLengthXY = std::sqrt(getRotatedCovMatrixXX(covMatrixPV, phi, 0.) + getRotatedCovMatrixXX(covMatrixPCA, phi, 0.));
 
-          int hfFlag = BIT(hf_cand_bs::DecayType::BsToDsPi);
-
           // fill output histograms for Bs candidates
           hMassDsToKKPi->Fill(hfHelper.invMassDsToKKPi(candDs), candDs.pt());
           hCovSVXX->Fill(covMatrixPCA[0]);
@@ -340,14 +343,14 @@ struct HfCandidateCreatorBs {
                            pVecDs[0], pVecDs[1], pVecDs[2],
                            pVecPion[0], pVecPion[1], pVecPion[2],
                            dcaDs.getY(), dcaPion.getY(),
-                           std::sqrt(dcaDs.getSigmaY2()), std::sqrt(dcaPion.getSigmaY2()),
-                           candDs.globalIndex(), trackPion.globalIndex(),
-                           hfFlag);
+                           std::sqrt(dcaDs.getSigmaY2()), std::sqrt(dcaPion.getSigmaY2()));
+
+          rowCandidateProngs(candDs.globalIndex(), trackPion.globalIndex());
         } // pi loop
-      }   // Ds loop
-    }     // collision loop
-  }       // process
-};        // struct
+      } // Ds loop
+    } // collision loop
+  } // process
+}; // struct
 
 /// Extends the base table with expression columns and performs MC matching.
 struct HfCandidateCreatorBsExpressions {
@@ -357,13 +360,11 @@ struct HfCandidateCreatorBsExpressions {
 
   void init(InitContext const&) {}
 
-  void processMc(aod::HfCand3Prong const& ds,
-                 aod::TracksWMc const& tracks,
-                 aod::McParticles const& mcParticles)
+  void processMc(aod::HfCand3Prong const&,
+                 aod::TracksWMc const&,
+                 aod::McParticles const& mcParticles,
+                 aod::HfCandBsProngs const& candsBs)
   {
-    rowCandidateBs->bindExternalIndices(&tracks);
-    rowCandidateBs->bindExternalIndices(&ds);
-
     int indexRec = -1;
     int8_t sign = 0;
     int8_t flag = 0;
@@ -372,8 +373,7 @@ struct HfCandidateCreatorBsExpressions {
     std::array<int, 2> arrPDGResonantDsPhiPi = {Pdg::kPhi, kPiPlus}; // Ds± → Phi π±
 
     // Match reconstructed candidates.
-    // Spawned table can be used directly
-    for (const auto& candidate : *rowCandidateBs) {
+    for (const auto& candidate : candsBs) {
       flag = 0;
       arrDaughDsIndex.clear();
       auto candDs = candidate.prong0();
@@ -398,7 +398,7 @@ struct HfCandidateCreatorBsExpressions {
               arrPDGDaughDs[iProng] = std::abs(daughI.pdgCode());
             }
             if ((arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[0] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[1]) || (arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[1] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[0])) {
-              flag = sign * BIT(hf_cand_bs::DecayTypeMc::BsToDsPiToKKPiPi);
+              flag = sign * BIT(hf_cand_bs::DecayTypeMc::BsToDsPiToPhiPiPiToKKPiPi);
             }
           }
         }
@@ -418,7 +418,7 @@ struct HfCandidateCreatorBsExpressions {
                 arrPDGDaughDs[iProng] = std::abs(daughI.pdgCode());
               }
               if ((arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[0] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[1]) || (arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[1] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[0])) {
-                flag = sign * BIT(hf_cand_bs::DecayTypeMc::B0ToDsPiToKKPiPi);
+                flag = sign * BIT(hf_cand_bs::DecayTypeMc::B0ToDsPiToPhiPiPiToKKPiPi);
               }
             }
           }
@@ -471,7 +471,7 @@ struct HfCandidateCreatorBsExpressions {
               arrPDGDaughDs[jProng] = std::abs(daughJ.pdgCode());
             }
             if ((arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[0] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[1]) || (arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[1] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[0])) {
-              flag = sign * BIT(hf_cand_bs::DecayTypeMc::BsToDsPiToKKPiPi);
+              flag = sign * BIT(hf_cand_bs::DecayTypeMc::BsToDsPiToPhiPiPiToKKPiPi);
             }
           }
         }
@@ -490,7 +490,7 @@ struct HfCandidateCreatorBsExpressions {
                 arrPDGDaughDs[jProng] = std::abs(daughJ.pdgCode());
               }
               if ((arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[0] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[1]) || (arrPDGDaughDs[0] == arrPDGResonantDsPhiPi[1] && arrPDGDaughDs[1] == arrPDGResonantDsPhiPi[0])) {
-                flag = sign * BIT(hf_cand_bs::DecayTypeMc::B0ToDsPiToKKPiPi);
+                flag = sign * BIT(hf_cand_bs::DecayTypeMc::B0ToDsPiToPhiPiPiToKKPiPi);
               }
             }
           }
@@ -499,7 +499,7 @@ struct HfCandidateCreatorBsExpressions {
 
       rowMcMatchGen(flag);
     } // gen
-  }   // processMc
+  } // processMc
   PROCESS_SWITCH(HfCandidateCreatorBsExpressions, processMc, "Process MC", false);
 }; // struct
 

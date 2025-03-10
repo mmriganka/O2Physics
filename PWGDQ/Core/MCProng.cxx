@@ -16,6 +16,13 @@
 
 ClassImp(MCProng);
 
+std::map<TString, int> MCProng::fgSourceNames = {
+  {"kNothing", MCProng::kNothing},
+  {"kPhysicalPrimary", MCProng::kPhysicalPrimary},
+  {"kProducedInTransport", MCProng::kProducedInTransport},
+  {"kProducedByGenerator", MCProng::kProducedByGenerator},
+  {"kFromBackgroundEvent", MCProng::kFromBackgroundEvent}};
+
 //________________________________________________________________________________________________________________
 MCProng::MCProng() : fNGenerations(0),
                      fPDGcodes({}),
@@ -146,7 +153,11 @@ void MCProng::Print() const
   for (int i = 0; i < fNGenerations; i++) {
     std::cout << "Generation #" << i << " PDGcode(" << fPDGcodes[i] << ") CheckBothCharges(" << fCheckBothCharges[i]
               << ") ExcludePDG(" << fExcludePDG[i] << ")  SourceBits(" << fSourceBits[i] << ") ExcludeSource(" << fExcludeSource[i]
-              << ") UseANDonSource(" << fUseANDonSourceBitMap[i] << ") CheckGenerationsInTime(" << fCheckGenerationsInTime << ") PDGInHistory(" << fPDGInHistory[i] << ") ExcludePDGInHistory(" << fExcludePDGInHistory[i] << ")" << std::endl;
+              << ") UseANDonSource(" << fUseANDonSourceBitMap[i] << ") CheckGenerationsInTime(" << fCheckGenerationsInTime << ")";
+    for (std::size_t j = 0; j < fPDGInHistory.size(); j++) {
+      std::cout << " #" << j << " PDGInHistory(" << fPDGInHistory[j] << ") ExcludePDGInHistory(" << fExcludePDGInHistory[j] << ")";
+    }
+    std::cout << std::endl;
   }
 }
 

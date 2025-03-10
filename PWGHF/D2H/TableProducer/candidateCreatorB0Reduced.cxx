@@ -15,6 +15,8 @@
 /// \author Alexandre Bigot <alexandre.bigot@cern.ch>, IPHC Strasbourg
 /// \author Fabrizio Grosa <fabrizio.grosa@cern.ch>, CERN
 
+#include <memory>
+
 #include "CommonConstants/PhysicsConstants.h"
 #include "DCAFitter/DCAFitterN.h"
 #include "Framework/AnalysisTask.h"
@@ -148,7 +150,7 @@ struct HfCandidateCreatorB0Reduced {
             continue;
           }
         } catch (const std::runtime_error& error) {
-          LOG(info) << "Run time error found: " << error.what() << ". DCFitterN cannot work, skipping the candidate.";
+          LOG(info) << "Run time error found: " << error.what() << ". DCAFitterN cannot work, skipping the candidate.";
           hCandidates->Fill(SVFitting::Fail);
           continue;
         }
@@ -193,8 +195,7 @@ struct HfCandidateCreatorB0Reduced {
                          pVecD[0], pVecD[1], pVecD[2],
                          pVecPion[0], pVecPion[1], pVecPion[2],
                          dcaD.getY(), dcaPion.getY(),
-                         std::sqrt(dcaD.getSigmaY2()), std::sqrt(dcaPion.getSigmaY2()),
-                         BIT(hf_cand_b0::DecayType::B0ToDPi));
+                         std::sqrt(dcaD.getSigmaY2()), std::sqrt(dcaPion.getSigmaY2()));
 
         rowCandidateProngs(candD.globalIndex(), trackPion.globalIndex());
 
@@ -294,7 +295,7 @@ struct HfCandidateCreatorB0ReducedExpressions {
         if ((rowDPiMcRec.prong0Id() != candB0.prong0Id()) || (rowDPiMcRec.prong1Id() != candB0.prong1Id())) {
           continue;
         }
-        rowB0McRec(rowDPiMcRec.flagMcMatchRec(), rowDPiMcRec.debugMcRec(), rowDPiMcRec.ptMother());
+        rowB0McRec(rowDPiMcRec.flagMcMatchRec(), rowDPiMcRec.flagWrongCollision(), rowDPiMcRec.debugMcRec(), rowDPiMcRec.ptMother());
         filledMcInfo = true;
         if constexpr (checkDecayTypeMc) {
           rowB0McCheck(rowDPiMcRec.pdgCodeBeautyMother(),
@@ -307,7 +308,7 @@ struct HfCandidateCreatorB0ReducedExpressions {
         break;
       }
       if (!filledMcInfo) { // protection to get same size tables in case something went wrong: we created a candidate that was not preselected in the D-Pi creator
-        rowB0McRec(0, -1, -1.f);
+        rowB0McRec(0, -1, -1, -1.f);
         if constexpr (checkDecayTypeMc) {
           rowB0McCheck(-1, -1, -1, -1, -1, -1);
         }

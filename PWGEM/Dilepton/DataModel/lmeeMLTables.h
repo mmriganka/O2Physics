@@ -16,7 +16,6 @@
 #include "Common/DataModel/TrackSelectionTables.h"
 #include "Common/DataModel/Multiplicity.h"
 #include "Common/DataModel/Centrality.h"
-#include <TMath.h>
 
 #ifndef PWGEM_DILEPTON_DATAMODEL_LMEEMLTABLES_H_
 #define PWGEM_DILEPTON_DATAMODEL_LMEEMLTABLES_H_
@@ -33,7 +32,7 @@ enum class PID_Label : int {
   kPion = 2,
   kKaon = 3,
   kProton = 4,
-}; // this can be used for eID with ITSsa.
+}; // this can be used for eID.
 
 enum class Track_Type : int {
   kPrimary = 0,
@@ -76,7 +75,7 @@ DECLARE_SOA_TABLE(EMPrimaryTracks, "AOD", "EMPTRACK", //!
                   track::TPCChi2NCl, track::TPCInnerParam,
                   track::TPCSignal, pidtpc::TPCNSigmaEl, pidtpc::TPCNSigmaMu, pidtpc::TPCNSigmaPi, pidtpc::TPCNSigmaKa, pidtpc::TPCNSigmaPr,
                   pidtofbeta::Beta, pidtof::TOFNSigmaEl, pidtof::TOFNSigmaMu, pidtof::TOFNSigmaPi, pidtof::TOFNSigmaKa, pidtof::TOFNSigmaPr,
-                  track::ITSClusterSizes, track::ITSChi2NCl, track::DetectorMap, emprimarytrack::PIDLabel, emprimarytrack::TrackType,
+                  track::ITSClusterSizes, track::ITSChi2NCl, track::TOFChi2, track::DetectorMap, emprimarytrack::PIDLabel, emprimarytrack::TrackType,
 
                   // dynamic column
                   emprimarytrack::P<track::Pt, track::Eta>,

@@ -36,9 +36,10 @@ struct singleTrackSelectorDummy {
 
   void process(aod::SingleCollSels::iterator const&)
   {
-    tableRowCollExtra(true,
-                      true,
-                      true);
+    uint64_t selection = 0;
+    tableRowCollExtra(selection,
+                      0.0,
+                      0);
   }
 };
 

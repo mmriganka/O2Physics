@@ -15,6 +15,9 @@
 /// \author Alexandre Bigot <alexandre.bigot@cern.ch>, IPHC Strasbourg
 /// \author Fabrizio Grosa <fabrizio.grosa@cern.ch>, CERN
 
+#include <string>
+#include <vector>
+
 #include "Framework/AnalysisTask.h"
 #include "Framework/runDataProcessing.h"
 
@@ -39,7 +42,7 @@ struct HfCandidateSelectorB0ToDPiReduced {
   Configurable<float> ptCandMin{"ptCandMin", 0., "Lower bound of candidate pT"};
   Configurable<float> ptCandMax{"ptCandMax", 50., "Upper bound of candidate pT"};
   // Enable PID
-  Configurable<int> usePionPid{"usePionPid", 1, "Switch for PID selection for the bachelor pion (0: none, 1: TPC or TOF, 2: TPC and TOF)"};
+  Configurable<int> pionPidMethod{"pionPidMethod", 1, "PID selection method for the bachelor pion (0: none, 1: TPC or TOF, 2: TPC and TOF)"};
   Configurable<bool> acceptPIDNotApplicable{"acceptPIDNotApplicable", true, "Switch to accept Status::NotApplicable [(NotApplicable for one detector) and (NotApplicable or Conditional for the other)] in PID selection"};
   // TPC PID
   Configurable<float> ptPidTpcMin{"ptPidTpcMin", 0.15, "Lower bound of track pT for TPC PID"};
@@ -53,18 +56,18 @@ struct HfCandidateSelectorB0ToDPiReduced {
   Configurable<float> nSigmaTofCombinedMax{"nSigmaTofCombinedMax", 5., "Nsigma cut on TOF combined with TPC"};
   // topological cuts
   Configurable<std::vector<double>> binsPt{"binsPt", std::vector<double>{hf_cuts_b0_to_d_pi::vecBinsPt}, "pT bin limits"};
-  Configurable<LabeledArray<double>> cuts{"cuts", {hf_cuts_b0_to_d_pi::cuts[0], hf_cuts_b0_to_d_pi::nBinsPt, hf_cuts_b0_to_d_pi::nCutVars, hf_cuts_b0_to_d_pi::labelsPt, hf_cuts_b0_to_d_pi::labelsCutVar}, "B0 candidate selection per pT bin"};
+  Configurable<LabeledArray<double>> cuts{"cuts", {hf_cuts_b0_to_d_pi::Cuts[0], hf_cuts_b0_to_d_pi::NBinsPt, hf_cuts_b0_to_d_pi::NCutVars, hf_cuts_b0_to_d_pi::labelsPt, hf_cuts_b0_to_d_pi::labelsCutVar}, "B0 candidate selection per pT bin"};
   // D-meson ML cuts
   Configurable<std::vector<double>> binsPtDmesMl{"binsPtDmesMl", std::vector<double>{hf_cuts_ml::vecBinsPt}, "D-meson pT bin limits for ML cuts"};
-  Configurable<LabeledArray<double>> cutsDmesMl{"cutsDmesMl", {hf_cuts_ml::cuts[0], hf_cuts_ml::nBinsPt, hf_cuts_ml::nCutScores, hf_cuts_ml::labelsPt, hf_cuts_ml::labelsDmesCutScore}, "D-meson ML cuts per pT bin"};
+  Configurable<LabeledArray<double>> cutsDmesMl{"cutsDmesMl", {hf_cuts_ml::Cuts[0], hf_cuts_ml::NBinsPt, hf_cuts_ml::NCutScores, hf_cuts_ml::labelsPt, hf_cuts_ml::labelsDmesCutScore}, "D-meson ML cuts per pT bin"};
   // QA switch
   Configurable<bool> activateQA{"activateQA", false, "Flag to enable QA histogram"};
   // B0 ML inference
   Configurable<bool> applyB0Ml{"applyB0Ml", false, "Flag to apply ML selections"};
   Configurable<std::vector<double>> binsPtB0Ml{"binsPtB0Ml", std::vector<double>{hf_cuts_ml::vecBinsPt}, "pT bin limits for ML application"};
   Configurable<std::vector<int>> cutDirB0Ml{"cutDirB0Ml", std::vector<int>{hf_cuts_ml::vecCutDir}, "Whether to reject score values greater or smaller than the threshold"};
-  Configurable<LabeledArray<double>> cutsB0Ml{"cutsB0Ml", {hf_cuts_ml::cuts[0], hf_cuts_ml::nBinsPt, hf_cuts_ml::nCutScores, hf_cuts_ml::labelsPt, hf_cuts_ml::labelsCutScore}, "ML selections per pT bin"};
-  Configurable<int8_t> nClassesB0Ml{"nClassesB0Ml", (int8_t)hf_cuts_ml::nCutScores, "Number of classes in ML model"};
+  Configurable<LabeledArray<double>> cutsB0Ml{"cutsB0Ml", {hf_cuts_ml::Cuts[0], hf_cuts_ml::NBinsPt, hf_cuts_ml::NCutScores, hf_cuts_ml::labelsPt, hf_cuts_ml::labelsCutScore}, "ML selections per pT bin"};
+  Configurable<int> nClassesB0Ml{"nClassesB0Ml", static_cast<int>(hf_cuts_ml::NCutScores), "Number of classes in ML model"};
   Configurable<std::vector<std::string>> namesInputFeatures{"namesInputFeatures", std::vector<std::string>{"feature1", "feature2"}, "Names of ML model input features"};
   // CCDB configuration
   Configurable<std::string> ccdbUrl{"ccdbUrl", "http://alice-ccdb.cern.ch", "url of the ccdb repository"};
@@ -94,11 +97,11 @@ struct HfCandidateSelectorB0ToDPiReduced {
       LOGP(fatal, "Only one process function for data should be enabled at a time.");
     }
 
-    if (usePionPid < 0 || usePionPid > 2) {
+    if (pionPidMethod < 0 || pionPidMethod > 2) {
       LOGP(fatal, "Invalid PID option in configurable, please set 0 (no PID), 1 (TPC or TOF), or 2 (TPC and TOF)");
     }
 
-    if (usePionPid) {
+    if (pionPidMethod) {
       selectorPion.setRangePtTpc(ptPidTpcMin, ptPidTpcMax);
       selectorPion.setRangeNSigmaTpc(-nSigmaTpcMax, nSigmaTpcMax);
       selectorPion.setRangeNSigmaTpcCondTof(-nSigmaTpcCombinedMax, nSigmaTpcCombinedMax);
@@ -114,6 +117,7 @@ struct HfCandidateSelectorB0ToDPiReduced {
       labels[1 + SelectionStep::RecoSkims] = "Skims selection";
       labels[1 + SelectionStep::RecoTopol] = "Skims & Topological selections";
       labels[1 + SelectionStep::RecoPID] = "Skims & Topological & PID selections";
+      labels[1 + aod::SelectionStep::RecoMl] = "ML selection";
       static const AxisSpec axisSelections = {kNBinsSelections, 0.5, kNBinsSelections + 0.5, ""};
       registry.add("hSelections", "Selections;;#it{p}_{T} (GeV/#it{c})", {HistType::kTH2F, {axisSelections, {(std::vector<double>)binsPt, "#it{p}_{T} (GeV/#it{c})"}}});
       for (int iBin = 0; iBin < kNBinsSelections; ++iBin) {
@@ -153,18 +157,6 @@ struct HfCandidateSelectorB0ToDPiReduced {
       int statusB0ToDPi = 0;
       auto ptCandB0 = hfCandB0.pt();
 
-      // check if flagged as B0 → D π
-      if (!TESTBIT(hfCandB0.hfflag(), hf_cand_b0::DecayType::B0ToDPi)) {
-        hfSelB0ToDPiCandidate(statusB0ToDPi);
-        if (applyB0Ml) {
-          hfMlB0ToDPiCandidate(outputMlNotPreselected);
-        }
-        if (activateQA) {
-          registry.fill(HIST("hSelections"), 1, ptCandB0);
-        }
-        // LOGF(info, "B0 candidate selection failed at hfflag check");
-        continue;
-      }
       SETBIT(statusB0ToDPi, SelectionStep::RecoSkims); // RecoSkims = 0 --> statusB0ToDPi = 1
       if (activateQA) {
         registry.fill(HIST("hSelections"), 2 + SelectionStep::RecoSkims, ptCandB0);
@@ -181,7 +173,7 @@ struct HfCandidateSelectorB0ToDPiReduced {
       }
 
       if constexpr (withDmesMl) { // we include it in the topological selections
-        if (!hfHelper.selectionDmesMlScoresForB(hfCandB0, cutsDmesMl, binsPtDmesMl)) {
+        if (!hfHelper.selectionDmesMlScoresForBReduced(hfCandB0, cutsDmesMl, binsPtDmesMl)) {
           hfSelB0ToDPiCandidate(statusB0ToDPi);
           if (applyB0Ml) {
             hfMlB0ToDPiCandidate(outputMlNotPreselected);
@@ -198,9 +190,9 @@ struct HfCandidateSelectorB0ToDPiReduced {
 
       // track-level PID selection
       auto trackPi = hfCandB0.template prong1_as<TracksPion>();
-      if (usePionPid) {
+      if (pionPidMethod) {
         int pidTrackPi{TrackSelectorPID::Status::NotApplicable};
-        if (usePionPid == 1) {
+        if (pionPidMethod == 1) {
           pidTrackPi = selectorPion.statusTpcOrTof(trackPi);
         } else {
           pidTrackPi = selectorPion.statusTpcAndTof(trackPi);
@@ -229,7 +221,7 @@ struct HfCandidateSelectorB0ToDPiReduced {
           hfSelB0ToDPiCandidate(statusB0ToDPi);
           continue;
         }
-        SETBIT(statusB0ToDPi, SelectionStep::RecoMl); // RecoML = 3 --> statusB0ToDPi = 15 if usePionPid, 11 otherwise
+        SETBIT(statusB0ToDPi, SelectionStep::RecoMl); // RecoML = 3 --> statusB0ToDPi = 15 if pionPidMethod, 11 otherwise
         if (activateQA) {
           registry.fill(HIST("hSelections"), 2 + SelectionStep::RecoMl, ptCandB0);
         }

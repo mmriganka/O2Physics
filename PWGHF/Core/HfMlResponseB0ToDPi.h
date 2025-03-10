@@ -9,7 +9,7 @@
 // granted to it by virtue of its status as an Intergovernmental Organization
 // or submit itself to any jurisdiction.
 
-/// \file HfMlResponsB0ToDPi.h
+/// \file HfMlResponseB0ToDPi.h
 /// \brief Class to compute the ML response for B0 → D∓ π± analysis selections
 /// \author Alexandre Bigot <alexandre.bigot@cern.ch>, IPHC Strasbourg
 
@@ -21,13 +21,14 @@
 #include <vector>
 
 #include "PWGHF/Core/HfMlResponse.h"
+#include "PWGHF/D2H/Utils/utilsRedDataFormat.h"
 
 // Fill the map of available input features
 // the key is the feature's name (std::string)
 // the value is the corresponding value in EnumInputFeatures
-#define FILL_MAP_B0(FEATURE)                                        \
-  {                                                                 \
-#FEATURE, static_cast < uint8_t>(InputFeaturesB0ToDPi::FEATURE) \
+#define FILL_MAP_B0(FEATURE)                                      \
+  {                                                               \
+    #FEATURE, static_cast<uint8_t>(InputFeaturesB0ToDPi::FEATURE) \
   }
 
 // Check if the index of mCachedIndices (index associated to a FEATURE)
@@ -57,31 +58,6 @@
     inputFeatures.emplace_back(candidate.GETTER());          \
     break;                                                   \
   }
-
-namespace o2::pid_tpc_tof_utils
-{
-template <typename T1>
-float getTpcTofNSigmaPi1(const T1& prong1)
-{
-  float defaultNSigma = -999.f; // -999.f is the default value set in TPCPIDResponse.h and PIDTOF.h
-
-  bool hasTpc = prong1.hasTPC();
-  bool hasTof = prong1.hasTOF();
-
-  if (hasTpc && hasTof) {
-    float tpcNSigma = prong1.tpcNSigmaPi();
-    float tofNSigma = prong1.tofNSigmaPi();
-    return sqrt(.5f * tpcNSigma * tpcNSigma + .5f * tofNSigma * tofNSigma);
-  }
-  if (hasTpc) {
-    return abs(prong1.tpcNSigmaPi());
-  }
-  if (hasTof) {
-    return abs(prong1.tofNSigmaPi());
-  }
-  return defaultNSigma;
-}
-} // namespace o2::pid_tpc_tof_utils
 
 namespace o2::analysis
 {

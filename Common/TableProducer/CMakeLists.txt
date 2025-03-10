@@ -112,3 +112,40 @@ o2physics_add_dpl_workflow(mftmchmatchingml
                                           O2::CCDB O2Physics::MLCore
                                           O2::ReconstructionDataFormats
                     COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(match-mft-ft0
+                    SOURCES match-mft-ft0.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                                          O2::ReconstructionDataFormats
+                                          O2::DetectorsBase O2::DetectorsCommonDataFormats
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(zdc-task-intercalib
+                    SOURCES zdc-task-intercalib.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(ese-table-producer
+                    SOURCES eseTableProducer.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(mftmch-matching-data
+                    SOURCES match-mft-mch-data.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2::DetectorsBase O2Physics::AnalysisCCDB O2Physics::PWGDQCore O2Physics::EventFilteringUtils
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(occ-table-producer
+                    SOURCES occupancyTableProducer.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(mftmch-matching-data-mc
+                    SOURCES match-mft-mch-data-mc.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2::DetectorsBase O2Physics::AnalysisCCDB O2Physics::PWGDQCore O2Physics::EventFilteringUtils
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(muon-realignment
+                    SOURCES muonRealignment.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2::DetectorsBase O2::DetectorsCommonDataFormats O2::MathUtils O2::MCHTracking O2::DataFormatsMCH O2::GlobalTracking O2::MCHBase O2::MCHGeometryTransformer O2::CommonUtils
+                    COMPONENT_NAME Analysis)

@@ -28,6 +28,19 @@
 //    david.dobrigkeit.chinellato@cern.ch
 //
 
+#include <Math/Vector4D.h>
+#include <cmath>
+#include <array>
+#include <cstdlib>
+
+#include <TFile.h>
+#include <TLorentzVector.h>
+#include <TH1F.h>
+#include <TH2F.h>
+#include <TProfile.h>
+#include <TPDGCode.h>
+#include <TDatabasePDG.h>
+
 #include "Framework/runDataProcessing.h"
 #include "Framework/AnalysisTask.h"
 #include "Framework/AnalysisDataModel.h"
@@ -44,21 +57,8 @@
 #include "Common/DataModel/EventSelection.h"
 #include "Common/DataModel/Centrality.h"
 #include "DataFormatsParameters/GRPObject.h"
-#include "DataFormatsParameters/GRPObject.h"
 #include "DataFormatsParameters/GRPMagField.h"
 #include "CCDB/BasicCCDBManager.h"
-
-#include <TFile.h>
-#include <TLorentzVector.h>
-#include <TH1F.h>
-#include <TH2F.h>
-#include <TProfile.h>
-#include <Math/Vector4D.h>
-#include <TPDGCode.h>
-#include <TDatabasePDG.h>
-#include <cmath>
-#include <array>
-#include <cstdlib>
 
 using namespace o2;
 using namespace o2::framework;
@@ -123,7 +123,7 @@ struct lambdakzeroprefilter {
 
 struct lambdakzerofinder {
   Produces<aod::V0Indices> v0indices;
-  Produces<aod::StoredV0Cores> v0cores;
+  Produces<aod::V0CoresBase> v0cores;
   Produces<aod::V0TrackXs> v0trackXs;
   Produces<aod::V0s_001> v0;
   Produces<aod::V0DataLink> v0datalink;
@@ -270,11 +270,11 @@ struct lambdakzerofinder {
     int collisionIndex = -1;
     //   float getDCAtoPV(float X, float Y, float Z, float Px, float Py, float Pz, float pvX, float pvY, float pvZ){
     for (auto const& collision : collisions) {
-      float thisDCA = TMath::Abs(getDCAtoPV(vtx[0], vtx[1], vtx[2], pvec0[0] + pvec1[0], pvec0[1] + pvec1[1], pvec0[2] + pvec1[2], collision.posX(), collision.posY(), collision.posY()));
+      float thisDCA = TMath::Abs(getDCAtoPV(vtx[0], vtx[1], vtx[2], pvec0[0] + pvec1[0], pvec0[1] + pvec1[1], pvec0[2] + pvec1[2], collision.posX(), collision.posY(), collision.posZ()));
       if (thisDCA < smallestDCA) {
         collisionIndex = collision.globalIndex();
         smallestDCA = thisDCA;
-        cosPA = RecoDecay::cpa(std::array{collision.posX(), collision.posY(), collision.posY()}, array{vtx[0], vtx[1], vtx[2]}, array{pvec0[0] + pvec1[0], pvec0[1] + pvec1[1], pvec0[2] + pvec1[2]});
+        cosPA = RecoDecay::cpa(std::array{collision.posX(), collision.posY(), collision.posZ()}, array{vtx[0], vtx[1], vtx[2]}, array{pvec0[0] + pvec1[0], pvec0[1] + pvec1[1], pvec0[2] + pvec1[2]});
       }
     }
     if (smallestDCA > maxV0DCAtoPV)

@@ -9,6 +9,8 @@
 # granted to it by virtue of its status as an Intergovernmental Organization
 # or submit itself to any jurisdiction.
 
+add_subdirectory(Converters)
+
 o2physics_add_dpl_workflow(cascadebuilder
     SOURCES cascadebuilder.cxx
     PUBLIC_LINK_LIBRARIES O2::DCAFitter O2Physics::AnalysisCore KFParticle::KFParticle O2Physics::MLCore
@@ -51,7 +53,12 @@ o2physics_add_dpl_workflow(cascqaanalysis
 
 o2physics_add_dpl_workflow(hstrangecorrelationfilter
     SOURCES hStrangeCorrelationFilter.cxx
-    PUBLIC_LINK_LIBRARIES O2::DCAFitter O2Physics::AnalysisCore
+    PUBLIC_LINK_LIBRARIES O2::DCAFitter O2Physics::AnalysisCore O2Physics::EventFilteringUtils
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(double-casc-tree-creator
+    SOURCES doubleCascTreeCreator.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::EventFilteringUtils
     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(lambdakzerobuilder
@@ -99,6 +106,16 @@ o2physics_add_dpl_workflow(strangederivedbuilder
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DetectorsBase
     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(strangenessbuilder
+    SOURCES strangenessbuilder.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter KFParticle::KFParticle
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(v0-selector
+    SOURCES v0selector.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(v0qaanalysis
     SOURCES v0qaanalysis.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
@@ -120,7 +137,17 @@ o2physics_add_dpl_workflow(lambdakzeromlselection
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(cascademlselection
+    SOURCES cascademlselection.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
+    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(sigma0builder
     SOURCES sigma0builder.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(lambdajetpolarizationbuilder
+    SOURCES lambdaJetpolarizationbuilder.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)

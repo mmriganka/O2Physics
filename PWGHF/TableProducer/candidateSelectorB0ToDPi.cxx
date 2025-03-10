@@ -14,6 +14,9 @@
 ///
 /// \author Alexandre Bigot <alexandre.bigot@cern.ch>, IPHC Strasbourg
 
+#include <vector>
+#include <string>
+
 #include "Framework/AnalysisTask.h"
 #include "Framework/runDataProcessing.h"
 #include "Framework/RunningWorkflowInfo.h"
@@ -50,7 +53,7 @@ struct HfCandidateSelectorB0ToDPi {
   Configurable<double> nSigmaTofCombinedMax{"nSigmaTofCombinedMax", 5., "Nsigma cut on TOF combined with TPC"};
   // topological cuts
   Configurable<std::vector<double>> binsPt{"binsPt", std::vector<double>{hf_cuts_b0_to_d_pi::vecBinsPt}, "pT bin limits"};
-  Configurable<LabeledArray<double>> cuts{"cuts", {hf_cuts_b0_to_d_pi::cuts[0], hf_cuts_b0_to_d_pi::nBinsPt, hf_cuts_b0_to_d_pi::nCutVars, hf_cuts_b0_to_d_pi::labelsPt, hf_cuts_b0_to_d_pi::labelsCutVar}, "B0 candidate selection per pT bin"};
+  Configurable<LabeledArray<double>> cuts{"cuts", {hf_cuts_b0_to_d_pi::Cuts[0], hf_cuts_b0_to_d_pi::NBinsPt, hf_cuts_b0_to_d_pi::NCutVars, hf_cuts_b0_to_d_pi::labelsPt, hf_cuts_b0_to_d_pi::labelsCutVar}, "B0 candidate selection per pT bin"};
   // QA switch
   Configurable<bool> activateQA{"activateQA", false, "Flag to enable QA histogram"};
   // check if selectionFlagD (defined in candidateCreatorB0.cxx) and usePid configurables are in sync
@@ -118,15 +121,6 @@ struct HfCandidateSelectorB0ToDPi {
       int statusB0ToDPi = 0;
       auto ptCandB0 = hfCandB0.pt();
 
-      // check if flagged as B0 → D π
-      if (!TESTBIT(hfCandB0.hfflag(), hf_cand_b0::DecayType::B0ToDPi)) {
-        hfSelB0ToDPiCandidate(statusB0ToDPi);
-        if (activateQA) {
-          registry.fill(HIST("hSelections"), 1, ptCandB0);
-        }
-        // LOGF(info, "B0 candidate selection failed at hfflag check");
-        continue;
-      }
       SETBIT(statusB0ToDPi, SelectionStep::RecoSkims); // RecoSkims = 0 --> statusB0ToDPi = 1
       if (activateQA) {
         registry.fill(HIST("hSelections"), 2 + SelectionStep::RecoSkims, ptCandB0);
