@@ -14,17 +14,26 @@
 ///
 /// \author Gian Michele Innocenti <gian.michele.innocenti@cern.ch>, CERN
 
-#include <vector>
-
-#include "CommonConstants/PhysicsConstants.h"
-#include "Framework/AnalysisTask.h"
-#include "Framework/runDataProcessing.h"
+#include "PWGHF/ALICE3/Core/DecayChannelsLegacy.h"
+#include "PWGHF/Core/HfHelper.h"
+#include "PWGHF/Core/SelectorCuts.h"
+#include "PWGHF/DataModel/AliasTables.h"
+#include "PWGHF/DataModel/CandidateReconstructionTables.h"
+#include "PWGHF/DataModel/CandidateSelectionTables.h"
 
 #include "Common/Core/TrackSelectorPID.h"
 
-#include "PWGHF/Core/HfHelper.h"
-#include "PWGHF/DataModel/CandidateReconstructionTables.h"
-#include "PWGHF/DataModel/CandidateSelectionTables.h"
+#include <CommonConstants/PhysicsConstants.h>
+#include <Framework/ASoA.h>
+#include <Framework/AnalysisDataModel.h>
+#include <Framework/AnalysisHelpers.h>
+#include <Framework/AnalysisTask.h>
+#include <Framework/Array2D.h>
+#include <Framework/Configurable.h>
+#include <Framework/InitContext.h>
+#include <Framework/runDataProcessing.h>
+
+#include <vector>
 
 using namespace o2;
 using namespace o2::analysis;
@@ -51,7 +60,6 @@ struct HfCandidateSelectorXiccToPKPiPi {
   Configurable<std::vector<double>> binsPt{"binsPt", std::vector<double>{hf_cuts_xicc_to_p_k_pi_pi::vecBinsPt}, "pT bin limits"};
   Configurable<LabeledArray<double>> cuts{"cuts", {hf_cuts_xicc_to_p_k_pi_pi::Cuts[0], hf_cuts_xicc_to_p_k_pi_pi::NBinsPt, hf_cuts_xicc_to_p_k_pi_pi::NCutVars, hf_cuts_xicc_to_p_k_pi_pi::labelsPt, hf_cuts_xicc_to_p_k_pi_pi::labelsCutVar}, "Xicc candidate selection per pT bin"};
 
-  HfHelper hfHelper;
   TrackSelectorPi selectorPion;
 
   using TracksSel = soa::Join<aod::Tracks, aod::TracksPidPi>;
@@ -73,7 +81,7 @@ struct HfCandidateSelectorXiccToPKPiPi {
   bool selectionTopol(const T1& hfCandXicc, const T2& hfCandXic, const T3& trackPi)
   {
     auto candpT = hfCandXicc.pt();
-    int pTBin = findBin(binsPt, candpT);
+    int const pTBin = findBin(binsPt, candpT);
     if (pTBin == -1) {
       return false;
     }
@@ -84,7 +92,7 @@ struct HfCandidateSelectorXiccToPKPiPi {
     }
 
     // check candidate mass is within a defined mass window
-    if (std::abs(hfHelper.invMassXiccToXicPi(hfCandXicc) - o2::constants::physics::MassXiCCPlusPlus) > cuts->get(pTBin, "m")) {
+    if (std::abs(HfHelper::invMassXiccToXicPi(hfCandXicc) - o2::constants::physics::MassXiCCPlusPlus) > cuts->get(pTBin, "m")) {
       return false;
     }
 
@@ -154,7 +162,7 @@ struct HfCandidateSelectorXiccToPKPiPi {
       // final selection flag: 0 - rejected, 1 - accepted
       auto statusXiccToPKPiPi = 0;
 
-      if (!(hfCandXicc.hfflag() & 1 << aod::hf_cand_xicc::DecayType::XiccToXicPi)) {
+      if ((hfCandXicc.hfflag() & 1 << aod::hf_cand_xicc::DecayType::XiccToXicPi) == 0) {
         hfSelXiccToPKPiPiCandidate(statusXiccToPKPiPi);
         continue;
       }
@@ -172,7 +180,7 @@ struct HfCandidateSelectorXiccToPKPiPi {
         pidPi = 1;
       } else {
         // track-level PID selection
-        int pidPion = selectorPion.statusTpcOrTof(trackPi);
+        int const pidPion = selectorPion.statusTpcOrTof(trackPi);
         if (pidPion == TrackSelectorPID::Accepted) {
           pidPi = 1;
         }

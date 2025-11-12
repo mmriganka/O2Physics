@@ -17,7 +17,7 @@ o2physics_add_dpl_workflow(f1protoninitializer
 
 o2physics_add_dpl_workflow(f1protonreducedtable
     SOURCES f1protonreducedtable.cxx
-    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DetectorsVertexing O2Physics::EventFilteringUtils
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DetectorsVertexing
     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(doublephitable
@@ -48,4 +48,14 @@ o2physics_add_dpl_workflow(resonance-merge-df
 o2physics_add_dpl_workflow(heptaquarktable
     SOURCES HeptaQuarktable.cxx
     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DetectorsVertexing
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(cksspinalignment
+    SOURCES cksspinalignment.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(resonance-tree-creator
+    SOURCES resonanceTreeCreator.cxx
+    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
     COMPONENT_NAME Analysis)

@@ -17,12 +17,17 @@ o2physics_add_dpl_workflow(tree-creator-electron-ml
 
 o2physics_add_dpl_workflow(tree-creator-electron-ml-dda
                     SOURCES treeCreatorElectronMLDDA.cxx
-                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::AnalysisCCDB
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(skimmer-primary-electron
                     SOURCES skimmerPrimaryElectron.cxx
-                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::MLCore
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(skimmer-primary-electron-qc
+                    SOURCES skimmerPrimaryElectronQC.cxx
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::MLCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(skimmer-primary-muon
@@ -30,8 +35,8 @@ o2physics_add_dpl_workflow(skimmer-primary-muon
                     PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2::GlobalTracking
                     COMPONENT_NAME Analysis)
 
-o2physics_add_dpl_workflow(skimmer-secondary-electron
-                    SOURCES skimmerSecondaryElectron.cxx
+o2physics_add_dpl_workflow(skimmer-primary-track
+                    SOURCES skimmerPrimaryTrack.cxx
                     PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
@@ -42,16 +47,11 @@ o2physics_add_dpl_workflow(create-emevent-dilepton
 
 o2physics_add_dpl_workflow(skimmer-ots
                     SOURCES skimmerOTS.cxx
-                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(associate-mc-info-dilepton
                     SOURCES associateMCinfoDilepton.cxx
-                    PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
-                    COMPONENT_NAME Analysis)
-
-o2physics_add_dpl_workflow(filter-dielectron-event
-                    SOURCES filterDielectronEvent.cxx
                     PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
@@ -64,4 +64,3 @@ o2physics_add_dpl_workflow(filter-eoi
                     SOURCES filterEoI.cxx
                     PUBLIC_LINK_LIBRARIES O2::Framework O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
-

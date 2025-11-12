@@ -14,39 +14,45 @@
 /// \author Nima Zardoshti <nima.zardoshti@cern.ch>
 //
 
-#include <vector>
-#include <utility>
+#include "RecoDecay.h"
 
-#include "fastjet/PseudoJet.hh"
-#include "fastjet/ClusterSequenceArea.hh"
-
-#include "CommonConstants/PhysicsConstants.h"
-#include "Framework/AnalysisTask.h"
-#include "Framework/AnalysisDataModel.h"
-#include "Framework/ASoA.h"
-#include "Framework/O2DatabasePDGPlugin.h"
-#include "Framework/HistogramRegistry.h"
-
-#include "Common/Core/TrackSelection.h"
-#include "Common/Core/TrackSelectionDefaults.h"
-#include "Common/DataModel/EventSelection.h"
-#include "Common/DataModel/TrackSelectionTables.h"
-
-#include "PWGJE/DataModel/Jet.h"
-#include "PWGJE/DataModel/JetSubstructure.h"
-#include "PWGJE/Core/JetFinder.h"
 #include "PWGJE/Core/FastJetUtilities.h"
-#include "PWGJE/Core/JetUtilities.h"
-#include "PWGJE/Core/JetHFUtilities.h"
 #include "PWGJE/Core/JetDQUtilities.h"
+#include "PWGJE/Core/JetFinder.h"
+#include "PWGJE/Core/JetFindingUtilities.h"
+#include "PWGJE/Core/JetHFUtilities.h"
 #include "PWGJE/Core/JetSubstructureUtilities.h"
+#include "PWGJE/Core/JetUtilities.h"
+#include "PWGJE/DataModel/Jet.h"
+#include "PWGJE/DataModel/JetReducedData.h"
+#include "PWGJE/DataModel/JetSubtraction.h"
+
+#include "Framework/ASoA.h"
+#include "Framework/HistogramRegistry.h"
+#include "Framework/O2DatabasePDGPlugin.h"
+#include <Framework/AnalysisHelpers.h>
+#include <Framework/Configurable.h>
+#include <Framework/HistogramSpec.h>
+#include <Framework/InitContext.h>
+
+#include <TMath.h>
+
+#include "fastjet/ClusterSequenceArea.hh"
+#include "fastjet/PseudoJet.hh"
+#include <fastjet/JetDefinition.hh>
+
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <math.h>
 
 using namespace o2;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
 
 // NB: runDataProcessing.h must be included after customize!
-#include "Framework/runDataProcessing.h"
 
 template <typename JetTableData, typename JetTableMCD, typename JetTableMCP, typename JetTableDataSub, typename CandidateTable, typename CandidateTableMCP, typename SubstructureTableData, typename SplittingsTableData, typename PairsTableData, typename SubstructureTableMCD, typename SplittingsTableMCD, typename PairsTableMCD, typename SubstructureTableMCP, typename SplittingsTableMCP, typename PairsTableMCP, typename SubstructureTableDataSub, typename SplittingsTableDataSub, typename PairsTableDataSub, typename TracksSub>
 struct JetSubstructureHFTask {
@@ -72,6 +78,10 @@ struct JetSubstructureHFTask {
   Configurable<float> alpha{"alpha", 1.0, "angularity alpha"};
   Configurable<bool> doPairBkg{"doPairBkg", true, "save bkg pairs"};
   Configurable<float> pairConstituentPtMin{"pairConstituentPtMin", 1.0, "pt cut off for constituents going into pairs"};
+  Configurable<std::string> trackSelections{"trackSelections", "globalTracks", "set track selections"};
+  Configurable<bool> applyTrackingEfficiency{"applyTrackingEfficiency", {false}, "configurable to decide whether to apply artificial tracking efficiency (discarding tracks) in jet finding"};
+  Configurable<std::vector<double>> trackingEfficiencyPtBinning{"trackingEfficiencyPtBinning", {0., 10, 999.}, "pt binning of tracking efficiency array if applyTrackingEfficiency is true"};
+  Configurable<std::vector<double>> trackingEfficiency{"trackingEfficiency", {1.0, 1.0}, "tracking efficiency array applied to jet finding if applyTrackingEfficiency is true"};
 
   Service<o2::framework::O2DatabasePDG> pdg;
   float candMass;
@@ -102,6 +112,9 @@ struct JetSubstructureHFTask {
   float perpConeRho;
 
   HistogramRegistry registry;
+
+  int trackSelection = -1;
+
   void init(InitContext const&)
   {
     registry.add("h2_jet_pt_jet_zg", ";#it{p}_{T,jet} (GeV/#it{c});#it{z}_{g}", {HistType::kTH2F, {{200, 0., 200.}, {22, 0.0, 1.1}}});
@@ -118,29 +131,53 @@ struct JetSubstructureHFTask {
 
     jetReclusterer.isReclustering = true;
     jetReclusterer.algorithm = fastjet::JetAlgorithm::cambridge_algorithm;
+    jetReclusterer.ghostRepeatN = 0;
 
     candMass = jetcandidateutilities::getTablePDGMass<CandidateTable>();
+
+    trackSelection = jetderiveddatautilities::initialiseTrackSelection(static_cast<std::string>(trackSelections));
+
+    if (applyTrackingEfficiency) {
+      if (trackingEfficiencyPtBinning->size() < 2) {
+        LOGP(fatal, "jetFinder workflow: trackingEfficiencyPtBinning configurable should have at least two bin edges");
+      }
+      if (trackingEfficiency->size() + 1 != trackingEfficiencyPtBinning->size()) {
+        LOGP(fatal, "jetFinder workflow: trackingEfficiency configurable should have exactly one less entry than the number of bin edges set in trackingEfficiencyPtBinning configurable");
+      }
+    }
   }
 
   Preslice<aod::JetTracks> TracksPerCollision = aod::jtrack::collisionId;
   PresliceOptional<aod::JTrackD0Subs> TracksPerD0DataSub = aod::bkgd0::candidateId;
   PresliceOptional<aod::JTrackDplusSubs> TracksPerDplusDataSub = aod::bkgdplus::candidateId;
+  PresliceOptional<aod::JTrackDsSubs> TracksPerDsDataSub = aod::bkgds::candidateId;
+  PresliceOptional<aod::JTrackDstarSubs> TracksPerDstarDataSub = aod::bkgdstar::candidateId;
   PresliceOptional<aod::JTrackLcSubs> TracksPerLcDataSub = aod::bkglc::candidateId;
+  PresliceOptional<aod::JTrackB0Subs> TracksPerB0DataSub = aod::bkgb0::candidateId;
   PresliceOptional<aod::JTrackBplusSubs> TracksPerBplusDataSub = aod::bkgbplus::candidateId;
+  PresliceOptional<aod::JTrackXicToXiPiPiSubs> TracksPerXicToXiPiPiDataSub = aod::bkgxictoxipipi::candidateId;
   PresliceOptional<aod::JTrackDielectronSubs> TracksPerDielectronDataSub = aod::bkgdielectron::candidateId;
   Preslice<aod::JetParticles> ParticlesPerMcCollision = aod::jmcparticle::mcCollisionId;
 
-  template <typename T, typename U, typename V, typename M, typename N>
-  auto selectSlicer(T const& D0Slicer, U const& DplusSlicer, V const& LcSlicer, M const& BplusSlicer, N const& DielectronSlicer)
+  template <typename T, typename U, typename V, typename M, typename N, typename O, typename P, typename Q, typename R>
+  auto selectSlicer(T const& D0Slicer, U const& DplusSlicer, V const& DsSlicer, M const& DstarSlicer, N const& LcSlicer, O const& B0Slicer, P const& BplusSlicer, Q const& XicToXiPiPiSlicer, R const& DielectronSlicer)
   {
     if constexpr (jethfutilities::isD0Table<CandidateTable>()) {
       return D0Slicer;
     } else if constexpr (jethfutilities::isDplusTable<CandidateTable>()) {
       return DplusSlicer;
+    } else if constexpr (jethfutilities::isDsTable<CandidateTable>()) {
+      return DsSlicer;
+    } else if constexpr (jethfutilities::isDstarTable<CandidateTable>()) {
+      return DstarSlicer;
     } else if constexpr (jethfutilities::isLcTable<CandidateTable>()) {
       return LcSlicer;
+    } else if constexpr (jethfutilities::isB0Table<CandidateTable>()) {
+      return B0Slicer;
     } else if constexpr (jethfutilities::isBplusTable<CandidateTable>()) {
       return BplusSlicer;
+    } else if constexpr (jethfutilities::isXicToXiPiPiTable<CandidateTable>()) {
+      return XicToXiPiPiSlicer;
     } else if constexpr (jetdqutilities::isDielectronTable<CandidateTable>()) {
       return DielectronSlicer;
     } else {
@@ -163,8 +200,6 @@ struct JetSubstructureHFTask {
     fastjet::PseudoJet parentSubJet2;
     bool softDropped = false;
     auto nsd = 0.0;
-    auto zg = -1.0;
-    auto rg = -1.0;
     while (daughterSubJet.has_parents(parentSubJet1, parentSubJet2)) {
 
       bool isHFInSubjet1 = false;
@@ -197,8 +232,8 @@ struct JetSubstructureHFTask {
       thetaVec.push_back(theta);
       if (z >= zCut * TMath::Power(theta / (jet.r() / 100.f), beta)) {
         if (!softDropped) {
-          zg = z;
-          rg = theta;
+          auto zg = z;
+          auto rg = theta;
           if constexpr (!isSubtracted && !isMCP) {
             registry.fill(HIST("h2_jet_pt_jet_zg"), jet.pt(), zg);
             registry.fill(HIST("h2_jet_pt_jet_rg"), jet.pt(), rg);
@@ -311,6 +346,25 @@ struct JetSubstructureHFTask {
     std::vector<typename U::iterator> tracksPerpCone1Vec;
     std::vector<typename U::iterator> tracksPerpCone2Vec;
     for (auto const& track : tracksPerCollision) {
+      if (!jetderiveddatautilities::applyTrackKinematics(track)) {
+        continue;
+      }
+
+      if constexpr (!std::is_same_v<std::decay_t<U>, aod::JetParticles>) {
+        if (!jetfindingutilities::isTrackSelected<typename U::iterator, typename U::iterator>(track, trackSelection, applyTrackingEfficiency, trackingEfficiency, trackingEfficiencyPtBinning)) {
+          continue;
+        }
+      }
+      bool isdaughterTrack = false;
+      for (auto& candidate : jet.template candidates_as<V>()) {
+        if (jetcandidateutilities::isDaughterTrack(track, candidate)) {
+          isdaughterTrack = true;
+          break;
+        }
+      }
+      if (isdaughterTrack) {
+        continue;
+      }
       float deltaPhi1 = track.phi() - perpCone1Phi;
       deltaPhi1 = RecoDecay::constrainAngle<float, float>(deltaPhi1, -M_PI);
       float deltaPhi2 = track.phi() - perpCone2Phi;
@@ -430,7 +484,7 @@ struct JetSubstructureHFTask {
                                  CandidateTable const& candidates,
                                  TracksSub const& tracks)
   {
-    analyseCharged<true>(jet, tracks, candidates, selectSlicer(TracksPerD0DataSub, TracksPerDplusDataSub, TracksPerLcDataSub, TracksPerBplusDataSub, TracksPerDielectronDataSub), jetSubstructureDataSubTable, jetSplittingsDataSubTable, jetPairsDataSubTable);
+    analyseCharged<true>(jet, tracks, candidates, selectSlicer(TracksPerD0DataSub, TracksPerDplusDataSub, TracksPerDsDataSub, TracksPerDstarDataSub, TracksPerLcDataSub, TracksPerB0DataSub, TracksPerBplusDataSub, TracksPerXicToXiPiPiDataSub, TracksPerDielectronDataSub), jetSubstructureDataSubTable, jetSplittingsDataSubTable, jetPairsDataSubTable);
   }
   PROCESS_SWITCH(JetSubstructureHFTask, processChargedJetsDataSub, "HF jet substructure on data", false);
 

@@ -53,12 +53,14 @@ class FlowPtContainer : public TNamed
   void fill(const double& w, const double& pt);
   void fillArray(FillType a, FillType b, double c, double d);
   int getVectorIndex(const int i, const int j) { return j * (mpar + 1) + i; }                                              // index for 2d array for storing pt correlations
-  int getVectorIndex(const int i, const int j, const int k, const int l) { return i + j * 3 + k * 3 * 3 + l * 3 * 3 * 3; } // index for 4d array for std vnpt correlation - size 3x3x3x3
+  int getVectorIndex(const int i, const int j, const int k, const int l) { return i + j * 3 + k * 3 * 3 + l * 3 * 3 * 5; } // index for 4d array for std vnpt correlation - size 3x3x3x3
   void calculateCorrelations();
   void calculateCMTerms();
   void fillPtProfiles(const double& lMult, const double& rn);
   void fillVnPtCorrProfiles(const double& lMult, const double& flowval, const double& flowtuples, const double& rn, uint8_t mask);
   void fillVnDeltaPtProfiles(const double& centmult, const double& flowval, const double& flowtuples, const double& rn, uint8_t mask);
+  void fillVnPtCorrProfiles(const int configIndex, const double& lMult, const double& flowval, const double& flowtuples, const double& rn, uint8_t mask);
+  void fillVnDeltaPtProfiles(const int configIndex, const double& centmult, const double& flowval, const double& flowtuples, const double& rn, uint8_t mask);
   void fillVnDeltaPtStdProfiles(const double& centmult, const double& rn);
   void fillVnPtCorrStdProfiles(const double& centmult, const double& rn);
   void fillVnPtProfiles(const double& centmult, const double& flowval, const double& flowtuples, const double& rn, uint8_t mask)
@@ -67,6 +69,29 @@ class FlowPtContainer : public TNamed
       fillVnDeltaPtProfiles(centmult, flowval, flowtuples, rn, mask);
     else
       fillVnPtCorrProfiles(centmult, flowval, flowtuples, rn, mask);
+  }
+  void fillVnPtProfiles(const int configIndex, const double& centmult, const double& flowval, const double& flowtuples, const double& rn, uint8_t mask)
+  {
+    if (fUseCentralMoments)
+      fillVnDeltaPtProfiles(configIndex, centmult, flowval, flowtuples, rn, mask);
+    else
+      fillVnPtCorrProfiles(configIndex, centmult, flowval, flowtuples, rn, mask);
+  }
+  void skipVnPtProfiles(uint8_t mask)
+  {
+    for (auto m(1); m <= mpar; ++m) {
+      if (!(mask & (1 << (m - 1)))) {
+        continue;
+      }
+      if (fUseCentralMoments) {
+        for (auto i = 0; i <= m; ++i) {
+          ++fillCounter;
+        }
+      } else {
+        ++fillCounter;
+      }
+    }
+    return;
   }
   void fillVnPtStdProfiles(const double& centmult, const double& rn)
   {
@@ -104,9 +129,9 @@ class FlowPtContainer : public TNamed
     cmDen.clear();
     fillCounter = 0;
     arr.clear();
-    arr.resize(3 * 3 * 3 * 3, {0.0, 0.0});
+    arr.resize(3 * 3 * 5 * 5, {0.0, 0.0});
     warr.clear();
-    warr.resize(3 * 3 * 3 * 3, 0.0);
+    warr.resize(3 * 3 * 5 * 5, 0.0);
   };
 
   TList* fCMTermList;
@@ -115,11 +140,11 @@ class FlowPtContainer : public TNamed
   TList* fCumulantList;
   TList* fCentralMomentList;
 
-  int mpar;                  //!
+  int mpar;
   int fillCounter;           //!
   unsigned int fEventWeight; //!
-  bool fUseCentralMoments;   //!
-  bool fUseGap;              //!
+  bool fUseCentralMoments;
+  bool fUseGap;
   void mergeBSLists(TList* source, TList* target);
   TH1* raiseHistToPower(TH1* inh, double p);
   std::vector<double> sumP;              //!
@@ -129,6 +154,7 @@ class FlowPtContainer : public TNamed
   std::vector<double> cmDen;             //!
   std::vector<std::complex<double>> arr; //!
   std::vector<double> warr;              //!
+  std::vector<int> fCovFirstIndex;       //!
   template <typename T>
   double getStdAABBCC(T& inarr);
   template <typename T>
@@ -149,6 +175,24 @@ class FlowPtContainer : public TNamed
   double getStdABC(T& inarr);
   template <typename T>
   double getStdABD(T& inarr);
+  template <typename T>
+  double getStdABCCCC(T& inarr);
+  template <typename T>
+  double getStdABCCCD(T& inarr);
+  template <typename T>
+  double getStdABCCDD(T& inarr);
+  template <typename T>
+  double getStdABCDDD(T& inarr);
+  template <typename T>
+  double getStdABDDDD(T& inarr);
+  template <typename T>
+  double getStdABCCC(T& inarr);
+  template <typename T>
+  double getStdABCCD(T& inarr);
+  template <typename T>
+  double getStdABCDD(T& inarr);
+  template <typename T>
+  double getStdABDDD(T& inarr);
 
  private:
   static constexpr float FactorialArray[9] = {1., 1., 2., 6., 24., 120., 720., 5040., 40320.};

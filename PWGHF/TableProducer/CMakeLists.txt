@@ -13,7 +13,7 @@
 
 o2physics_add_dpl_workflow(track-index-skim-creator
                     SOURCES trackIndexSkimCreator.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DetectorsVertexing O2::DCAFitter O2Physics::AnalysisCCDB O2Physics::MLCore O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DetectorsVertexing O2::DCAFitter O2Physics::AnalysisCCDB O2Physics::MLCore O2Physics::SGCutParHolder
                     COMPONENT_NAME Analysis)
 
 # Helpers
@@ -37,12 +37,12 @@ o2physics_add_dpl_workflow(mc-pid-tof
 
 o2physics_add_dpl_workflow(candidate-creator-2prong
                     SOURCES candidateCreator2Prong.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter KFParticle::KFParticle O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter KFParticle::KFParticle O2Physics::SGCutParHolder
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-creator-3prong
                     SOURCES candidateCreator3Prong.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter KFParticle::KFParticle O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter KFParticle::KFParticle O2Physics::SGCutParHolder
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-creator-b0
@@ -62,12 +62,12 @@ o2physics_add_dpl_workflow(candidate-creator-bs
 
 o2physics_add_dpl_workflow(candidate-creator-cascade
                     SOURCES candidateCreatorCascade.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-creator-dstar
                     SOURCES candidateCreatorDstar.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-creator-lb
@@ -87,7 +87,7 @@ o2physics_add_dpl_workflow(candidate-creator-sigmac0plusplus-cascade
 
 o2physics_add_dpl_workflow(candidate-creator-xic0-omegac0
                     SOURCES candidateCreatorXic0Omegac0.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter O2Physics::EventFilteringUtils KFParticle::KFParticle
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter KFParticle::KFParticle
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-creator-xic-to-xi-pi-pi
@@ -109,7 +109,7 @@ o2physics_add_dpl_workflow(candidate-creator-mc-gen
 
 o2physics_add_dpl_workflow(candidate-selector-b0-to-d-pi
                     SOURCES candidateSelectorB0ToDPi.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-selector-bplus-to-d0-pi
@@ -172,14 +172,19 @@ o2physics_add_dpl_workflow(candidate-selector-omegac0-to-omega-pi
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
                     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(candidate-selector-omegac0-xic0-to-omega-ka
+                    SOURCES candidateSelectorOmegac0Xic0ToOmegaKa.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
+                    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(candidate-selector-xic0-to-xi-pi-kf
                     SOURCES candidateSelectorXic0ToXiPiKf.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-selector-to-xi-pi
                     SOURCES candidateSelectorToXiPi.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2Physics::MLCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(candidate-selector-xic-to-p-k-pi
@@ -196,6 +201,11 @@ o2physics_add_dpl_workflow(candidate-selector-xicc-to-p-k-pi-pi
                     SOURCES candidateSelectorXiccToPKPiPi.cxx
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
+
+ o2physics_add_dpl_workflow(candidate-selector-cd
+                     SOURCES candidateSelectorCd.cxx
+                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                     COMPONENT_NAME Analysis)
 
 # Tree creators
 
@@ -244,18 +254,23 @@ o2physics_add_dpl_workflow(tree-creator-lc-to-p-k-pi
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(tree-creator-sigmac-corr-bkg
+                    SOURCES treeCreatorSigmacCorrBkg.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(tree-creator-omegac-st
                     SOURCES treeCreatorOmegacSt.cxx
-                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter O2Physics::EventFilteringUtils
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore O2::DCAFitter
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(tree-creator-omegac0-to-omega-ka
-                    SOURCES treeCreatorOmegacToOmegaKa.cxx
+                    SOURCES treeCreatorOmegac0ToOmegaKa.cxx
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
 o2physics_add_dpl_workflow(tree-creator-omegac0-to-omega-pi
-                    SOURCES treeCreatorOmegacToOmegaPi.cxx
+                    SOURCES treeCreatorOmegac0ToOmegaPi.cxx
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
@@ -295,6 +310,11 @@ o2physics_add_dpl_workflow(tree-creator-tcc-to-d0-d0-pi
                     COMPONENT_NAME Analysis)
 # Derived-data creators
 
+o2physics_add_dpl_workflow(derived-data-creator-b0-to-d-pi
+                    SOURCES derivedDataCreatorB0ToDPi.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(derived-data-creator-bplus-to-d0-pi
                     SOURCES derivedDataCreatorBplusToD0Pi.cxx
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
@@ -310,14 +330,29 @@ o2physics_add_dpl_workflow(derived-data-creator-dplus-to-pi-k-pi
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
+o2physics_add_dpl_workflow(derived-data-creator-ds-to-k-k-pi
+                    SOURCES derivedDataCreatorDsToKKPi.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(derived-data-creator-dstar-to-d0-pi
+                    SOURCES derivedDataCreatorDstarToD0Pi.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
 o2physics_add_dpl_workflow(derived-data-creator-lc-to-p-k-pi
                     SOURCES derivedDataCreatorLcToPKPi.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)
+
+o2physics_add_dpl_workflow(derived-data-creator-xic-to-xi-pi-pi
+                    SOURCES derivedDataCreatorXicToXiPiPi.cxx
                     PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
                     COMPONENT_NAME Analysis)
 
 # Converters
 
 o2physics_add_dpl_workflow(converter-dstar-indices
-                           SOURCES converterDstarIndices.cxx
-                           PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
-                           COMPONENT_NAME Analysis)
+                    SOURCES converterDstarIndices.cxx
+                    PUBLIC_LINK_LIBRARIES O2Physics::AnalysisCore
+                    COMPONENT_NAME Analysis)

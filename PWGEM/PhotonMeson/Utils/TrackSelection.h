@@ -9,13 +9,16 @@
 // granted to it by virtue of its status as an Intergovernmental Organization
 // or submit itself to any jurisdiction.
 
+/// \file TrackSelection.h
 /// \brief helper functions for pair track selection
 /// \author felix.schlepper@cern.ch
 
 #ifndef PWGEM_PHOTONMESON_UTILS_TRACKSELECTION_H_
 #define PWGEM_PHOTONMESON_UTILS_TRACKSELECTION_H_
 
-#include "TPDGCode.h"
+#include <TPDGCode.h>
+
+#include <cmath>
 
 namespace o2::pwgem::photonmeson
 {
@@ -43,7 +46,7 @@ inline bool isITSTPCTrack(TTrack const& track)
 template <typename TTrack>
 inline bool isTPCTRDTrack(TTrack const& track)
 {
-  return !track.hasITS() && track.hasTPC() && track.hasTRD();
+  return !track.hasITS() && track.hasTPC() && track.hasTRD() && !track.hasTOF();
 }
 
 /**
@@ -56,7 +59,7 @@ inline bool isTPCTRDTrack(TTrack const& track)
 template <typename TTrack>
 inline bool isITSTPCTRDTrack(TTrack const& track)
 {
-  return track.hasITS() && track.hasTPC() && track.hasTRD();
+  return track.hasITS() && track.hasTPC() && track.hasTRD() && !track.hasTOF();
 }
 
 /**
@@ -215,7 +218,7 @@ inline bool isTPConly_ITSonly(TTrack const& track0, TTrack const& track1)
 template <PDG_t motherType, typename T>
 inline bool checkMCParticles(T const& mc1, T const& mc2)
 {
-  if (abs(mc1.pdgCode()) != kElectron || abs(mc2.pdgCode()) != kElectron) {
+  if (std::abs(mc1.pdgCode()) != kElectron || std::abs(mc2.pdgCode()) != kElectron) {
     return false;
   }
   if (!mc1.has_mothers() || !mc2.has_mothers()) {

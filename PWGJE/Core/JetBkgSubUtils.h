@@ -17,28 +17,21 @@
 #ifndef PWGJE_CORE_JETBKGSUBUTILS_H_
 #define PWGJE_CORE_JETBKGSUBUTILS_H_
 
-#include <string>
-#include <memory>
+#include <fastjet/AreaDefinition.hh>
+#include <fastjet/GhostedAreaSpec.hh>
+#include <fastjet/JetDefinition.hh>
+#include <fastjet/PseudoJet.hh>
+#include <fastjet/Selector.hh>
+
 #include <tuple>
 #include <vector>
-#include <TMath.h>
 
-#include "PWGJE/Core/FastJetUtilities.h"
-
-#include "fastjet/PseudoJet.hh"
-#include "fastjet/ClusterSequenceArea.hh"
-#include "fastjet/AreaDefinition.hh"
-#include "fastjet/JetDefinition.hh"
-#include "fastjet/tools/JetMedianBackgroundEstimator.hh"
-#include "fastjet/tools/Subtractor.hh"
-#include "fastjet/contrib/ConstituentSubtractor.hh"
-
-#include "Framework/Logger.h"
+#include <math.h>
 
 enum class BkgSubEstimator { none = 0,
                              medianRho = 1,
-                             medianRhoSparse = 2,
-                             perpCone = 3
+                             medianRhoSparse = 2
+                             // perpendicular cone method is in JetUtilities
 };
 
 enum class BkgSubMode { none = 0,
@@ -75,18 +68,12 @@ class JetBkgSubUtils
   /// @return Rho, RhoM the underlying event density
   std::tuple<double, double> estimateRhoAreaMedian(const std::vector<fastjet::PseudoJet>& inputParticles, bool doSparseSub);
 
-  /// @brief Background estimator using the perpendicular cone method
-  /// @param inputParticles
-  /// @param jets (all jets in the event)
-  /// @return Rho, RhoM the underlying event density
-  std::tuple<double, double> estimateRhoPerpCone(const std::vector<fastjet::PseudoJet>& inputParticles, const std::vector<fastjet::PseudoJet>& jets);
-
   /// @brief method that subtracts the background from jets using the area method
   /// @param jet input jet to be background subtracted
   /// @param rhoParam the underlying evvent density vs pT (to be set)
   /// @param rhoParam the underlying evvent density vs jet mass (to be set)
   /// @return jet, background subtracted jet
-  fastjet::PseudoJet doRhoAreaSub(fastjet::PseudoJet& jet, double rhoParam, double rhoMParam);
+  fastjet::PseudoJet doRhoAreaSub(const fastjet::PseudoJet& jet, double rhoParam, double rhoMParam);
 
   /// @brief method that subtracts the background from the input particles using the event-wise cosntituent subtractor
   /// @param inputParticles (all the tracks/clusters/particles in the event)

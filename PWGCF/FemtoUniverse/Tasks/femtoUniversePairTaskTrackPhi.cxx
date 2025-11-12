@@ -1,4 +1,4 @@
-// Copyright 2019-2022 CERN and copyright holders of ALICE O2.
+// Copyright 2019-2025 CERN and copyright holders of ALICE O2.
 // See https://alice-o2.web.cern.ch/copyright for details of the copyright holders.
 // All rights not expressly granted are reserved.
 //
@@ -16,29 +16,31 @@
 /// \author Anton Riedel, TU München, anton.riedel@tum.de
 /// \author Zuzanna Chochulska, WUT Warsaw & CTU Prague, zchochul@cern.ch
 
-#include <vector>
-#include <string>
-#include "Framework/AnalysisTask.h"
-#include "Framework/runDataProcessing.h"
-#include "Framework/HistogramRegistry.h"
-#include "Framework/ASoAHelpers.h"
-#include "Framework/O2DatabasePDGPlugin.h"
-#include "ReconstructionDataFormats/PID.h"
-
-#include "PWGCF/FemtoUniverse/DataModel/FemtoDerived.h"
-#include "PWGCF/FemtoUniverse/Core/FemtoUniverseParticleHisto.h"
-#include "PWGCF/FemtoUniverse/Core/FemtoUniverseEventHisto.h"
-#include "PWGCF/FemtoUniverse/Core/FemtoUniversePairCleaner.h"
 #include "PWGCF/FemtoUniverse/Core/FemtoUniverseContainer.h"
 #include "PWGCF/FemtoUniverse/Core/FemtoUniverseDetaDphiStar.h"
+#include "PWGCF/FemtoUniverse/Core/FemtoUniverseEfficiencyCorrection.h"
+#include "PWGCF/FemtoUniverse/Core/FemtoUniverseEventHisto.h"
+#include "PWGCF/FemtoUniverse/Core/FemtoUniversePairCleaner.h"
+#include "PWGCF/FemtoUniverse/Core/FemtoUniverseParticleHisto.h"
 #include "PWGCF/FemtoUniverse/Core/FemtoUniverseTrackSelection.h"
-#include "PWGCF/FemtoUniverse/Core/FemtoUniverseEfficiencyCalculator.h"
+#include "PWGCF/FemtoUniverse/DataModel/FemtoDerived.h"
+
+#include "Framework/ASoAHelpers.h"
+#include "Framework/AnalysisTask.h"
+#include "Framework/HistogramRegistry.h"
+#include "Framework/O2DatabasePDGPlugin.h"
+#include "Framework/runDataProcessing.h"
+#include "ReconstructionDataFormats/PID.h"
+
 #include <TFile.h>
 #include <TH1.h>
 
+#include <string>
+#include <vector>
+
 using namespace o2;
 using namespace o2::analysis::femto_universe;
-using namespace o2::analysis::femto_universe::efficiency;
+using namespace o2::analysis::femto_universe::efficiency_correction;
 using namespace o2::framework;
 using namespace o2::framework::expressions;
 using namespace o2::soa;
@@ -185,8 +187,12 @@ struct FemtoUniversePairTaskTrackPhi {
   HistogramRegistry registryDCA{"registryDCA", {}, OutputObjHandlingPolicy::AnalysisObject, false, true};
   HistogramRegistry registryMCpT{"registryMCpT", {}, OutputObjHandlingPolicy::AnalysisObject, false, true};
 
-  EfficiencyConfigurableGroup effConfGroup;
-  EfficiencyCalculator<TH1> efficiencyCalculator{&effConfGroup};
+  ColumnBinningPolicy<aod::collision::PosZ, aod::femtouniversecollision::MultNtr> colBinning{{ConfBinsVtx, ConfBinsMult}, true};
+
+  HistogramRegistry effCorrRegistry{"EfficiencyCorrection", {}, OutputObjHandlingPolicy::AnalysisObject};
+
+  EffCorConfigurableGroup effCorConfGroup;
+  EfficiencyCorrection effCorrection{&effCorConfGroup};
 
   float weight = 1;
 
@@ -370,6 +376,12 @@ struct FemtoUniversePairTaskTrackPhi {
     }
   }
 
+  /// @returns 1 if positive, -1 if negative, 0 if zero
+  auto sign(auto number) -> int8_t
+  {
+    return (number > 0) - (number < 0);
+  }
+
   void init(InitContext&)
   {
     if (ConfIsMC) {
@@ -381,7 +393,14 @@ struct FemtoUniversePairTaskTrackPhi {
       registryMCpT.add("MCReco/C_p_pT", "; #it{p_T} (GeV/#it{c}); Counts", kTH1F, {{100, 0, 10}});
       registryMCpT.add("MCReco/NC_p_pT", "; #it{p_T} (GeV/#it{c}); Counts", kTH1F, {{100, 0, 10}});
     }
-    efficiencyCalculator.init();
+
+    effCorrection.init(
+      &effCorrRegistry,
+      {
+        static_cast<framework::AxisSpec>(ConfBinsTempFitVarpT),
+        {ConfBinsEta, -1, 1},
+        ConfBinsMult,
+      });
 
     eventHisto.init(&qaRegistry);
     qaRegistry.add("PhiDaugh_pos/nSigmaTPC", "; #it{p} (GeV/#it{c}); n#sigma_{TPC}", kTH2F, {{100, 0, 10}, {200, -4.975, 5.025}});
@@ -465,15 +484,10 @@ struct FemtoUniversePairTaskTrackPhi {
     }
   }
 
-  template <typename PartitionType, typename PartType, typename MCParticles = std::nullptr_t>
-  void doSameEvent(FilteredFDCollision const& col, PartType const& parts, PartitionType& groupPartsOne, PartitionType& groupPartsTwo, [[maybe_unused]] MCParticles mcParts = nullptr)
+  template <bool isMC, typename PartitionType, typename PartType, typename MCParticles = std::nullptr_t>
+  void doSameEvent(PartitionType groupPartsTrack, PartitionType groupPartsPhi, PartType parts, float magFieldTesla, int multCol, [[maybe_unused]] MCParticles mcParts = nullptr)
   {
-    const auto& magFieldTesla = col.magField();
-    const int multCol = col.multNtr();
-
-    eventHisto.fillQA(col);
-
-    for (auto const& phicandidate : groupPartsTwo) {
+    for (auto const& phicandidate : groupPartsPhi) {
       // TODO: add phi meson minv cut here
       const auto& posChild = parts.iteratorAt(phicandidate.index() - 2);
       float tpcNSigmaKp = trackCuts.getNsigmaTPC(posChild, o2::track::PID::Kaon);
@@ -496,9 +510,13 @@ struct FemtoUniversePairTaskTrackPhi {
       qaRegistry.fill(HIST("PhiDaugh_neg/hDCAxy"), negChild.p(), negChild.tempFitVar());
 
       trackHistoPartPhi.fillQA<false, false>(phicandidate);
+      if constexpr (isMC) {
+        // reco
+        effCorrection.fillRecoHist<ParticleNo::ONE, FilteredFDCollisions>(phicandidate, 333);
+      }
     }
 
-    for (auto const& track : groupPartsOne) {
+    for (auto const& track : groupPartsTrack) {
       float tpcNSigmaPi = trackCuts.getNsigmaTPC(track, o2::track::PID::Pion);
       float tofNSigmaPi = trackCuts.getNsigmaTOF(track, o2::track::PID::Pion);
       float tpcNSigmaKa = trackCuts.getNsigmaTPC(track, o2::track::PID::Kaon);
@@ -532,12 +550,14 @@ struct FemtoUniversePairTaskTrackPhi {
         qaRegistry.fill(HIST("Hadron_neg/nSigmaTOFPr"), track.p(), tofNSigmaPr);
       }
       trackHistoPartTrack.fillQA<false, false>(track);
+
+      if constexpr (isMC) {
+        effCorrection.fillRecoHist<ParticleNo::TWO, FilteredFDCollisions>(track, ConfTrackPDGCode);
+      }
     }
 
     /// Now build the combinations
-    for (auto const& [track, phicandidate] : combinations(CombinationsFullIndexPolicy(groupPartsOne, groupPartsTwo))) {
-      // TODO: add phi inv mass cut here
-
+    for (auto const& [track, phicandidate] : combinations(CombinationsFullIndexPolicy(groupPartsTrack, groupPartsPhi))) {
       if (ConfTrackIsIdentified) {
         if (!isParticleNSigmaAccepted(track.p(), trackCuts.getNsigmaTPC(track, o2::track::PID::Proton), trackCuts.getNsigmaTOF(track, o2::track::PID::Proton), trackCuts.getNsigmaTPC(track, o2::track::PID::Pion), trackCuts.getNsigmaTOF(track, o2::track::PID::Pion), trackCuts.getNsigmaTPC(track, o2::track::PID::Kaon), trackCuts.getNsigmaTOF(track, o2::track::PID::Kaon))) {
           continue;
@@ -561,13 +581,8 @@ struct FemtoUniversePairTaskTrackPhi {
       if (!pairCleaner.isCleanPair(track, phicandidate, parts)) {
         continue;
       }
-
-      weight = efficiencyCalculator.getWeight(ParticleNo::ONE, phicandidate.pt()) * efficiencyCalculator.getWeight(ParticleNo::TWO, track.pt());
-
-      if constexpr (std::is_same<PartType, FemtoRecoParticles>::value)
-        sameEventCont.setPair<true>(track, phicandidate, multCol, ConfUse3D, weight);
-      else
-        sameEventCont.setPair<false>(track, phicandidate, multCol, ConfUse3D, weight);
+      weight = effCorrection.getWeight<FilteredFDCollisions>(ParticleNo::ONE, phicandidate) * effCorrection.getWeight<FilteredFDCollisions>(ParticleNo::TWO, track);
+      sameEventCont.setPair<isMC>(track, phicandidate, multCol, ConfUse3D, weight);
     }
 
     // // Used for better fitting of invariant mass background.
@@ -597,91 +612,91 @@ struct FemtoUniversePairTaskTrackPhi {
     // }
   }
 
+  template <bool isMC, typename PartitionType, typename PartType, typename MCParticles = std::nullptr_t>
+  void doMixedEvent(PartitionType groupPartsTrack, PartitionType groupPartsPhi, PartType parts, float magFieldTesla, int multCol, [[maybe_unused]] MCParticles mcParts = nullptr)
+  {
+    for (auto const& [track, phicandidate] : combinations(CombinationsFullIndexPolicy(groupPartsTrack, groupPartsPhi))) {
+      if (ConfTrackIsIdentified) {
+        if (!isParticleNSigmaAccepted(track.p(), trackCuts.getNsigmaTPC(track, o2::track::PID::Proton), trackCuts.getNsigmaTOF(track, o2::track::PID::Proton), trackCuts.getNsigmaTPC(track, o2::track::PID::Pion), trackCuts.getNsigmaTOF(track, o2::track::PID::Pion), trackCuts.getNsigmaTPC(track, o2::track::PID::Kaon), trackCuts.getNsigmaTOF(track, o2::track::PID::Kaon))) {
+          continue;
+        }
+        if (ConfTrackIsRejected) {
+          if (isParticleNSigmaRejected(track.p(), trackCuts.getNsigmaTPC(track, o2::track::PID::Proton), trackCuts.getNsigmaTOF(track, o2::track::PID::Proton), trackCuts.getNsigmaTPC(track, o2::track::PID::Pion), trackCuts.getNsigmaTOF(track, o2::track::PID::Pion), trackCuts.getNsigmaTPC(track, o2::track::PID::Kaon), trackCuts.getNsigmaTOF(track, o2::track::PID::Kaon))) {
+            continue;
+          }
+        }
+      }
+
+      if (ConfCPRIsEnabled) {
+        if (pairCloseRejection.isClosePair(track, phicandidate, parts, magFieldTesla, femto_universe_container::EventType::mixed)) {
+          continue;
+        }
+      }
+      weight = effCorrection.getWeight<FilteredFDCollisions>(ParticleNo::ONE, phicandidate) * effCorrection.getWeight<FilteredFDCollisions>(ParticleNo::TWO, track);
+      mixedEventCont.setPair<isMC>(track, phicandidate, multCol, ConfUse3D, weight);
+    }
+  }
+
   void processSameEvent(FilteredFDCollision const& col, FilteredFemtoFullParticles const& parts)
   {
     auto thegroupPartsTrack = partsTrack->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
     auto thegroupPartsPhi = partsPhi->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
-    // auto thegroupPartsPhiDaugh = partsPhiDaugh->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
-    // auto thegroupPartsKaons = partsKaons->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
-
-    doSameEvent(col, parts, thegroupPartsTrack, thegroupPartsPhi);
+    eventHisto.fillQA(col);
+    doSameEvent<false>(thegroupPartsTrack, thegroupPartsPhi, parts, col.magField(), col.multNtr());
   }
   PROCESS_SWITCH(FemtoUniversePairTaskTrackPhi, processSameEvent, "Enable processing same event", true);
 
-  template <typename PartitionType, typename PartType, typename MCParticles = std::nullptr_t>
-  void doMixedEvent(FilteredFDCollisions const& cols, PartType const& parts, PartitionType& partitionPhi, PartitionType& partitionTrack, [[maybe_unused]] MCParticles mcParts = nullptr)
+  void processMixedEvent(FilteredFDCollisions const& cols, FilteredFemtoFullParticles const& parts)
   {
-    ColumnBinningPolicy<aod::collision::PosZ, aod::femtouniversecollision::MultNtr> colBinning{{ConfBinsVtx, ConfBinsMult}, true};
+    for (auto const& [collision1, collision2] : soa::selfCombinations(colBinning, 5, -1, cols, cols)) {
+      const int multiplicityCol = collision1.multNtr();
+      mixQaRegistry.fill(HIST("MixingQA/hMECollisionBins"), colBinning.getBin({collision1.posZ(), multiplicityCol}));
 
-    auto mixedCollProcessFunc = [&](auto& collision1, auto& collision2) -> void {
-      const int multCol = collision1.multNtr();
-
-      auto groupPartsPhi = partitionPhi->sliceByCached(aod::femtouniverseparticle::fdCollisionId, collision1.globalIndex(), cache);
-      auto groupPartsTrack = partitionTrack->sliceByCached(aod::femtouniverseparticle::fdCollisionId, collision1.globalIndex(), cache);
+      auto groupPartsTrack = partsTrack->sliceByCached(aod::femtouniverseparticle::fdCollisionId, collision2.globalIndex(), cache);
+      auto groupPartsPhi = partsPhi->sliceByCached(aod::femtouniverseparticle::fdCollisionId, collision1.globalIndex(), cache);
 
       const auto& magFieldTesla1 = collision1.magField();
       const auto& magFieldTesla2 = collision2.magField();
 
       if (magFieldTesla1 != magFieldTesla2) {
-        return;
+        continue;
       }
 
-      for (const auto& [phicandidate, track] : combinations(CombinationsFullIndexPolicy(groupPartsPhi, groupPartsTrack))) {
-        // TODO: move here phi meson mass cut
-
-        if (ConfTrackIsIdentified) {
-          if (!isParticleNSigmaAccepted(track.p(), trackCuts.getNsigmaTPC(track, o2::track::PID::Proton), trackCuts.getNsigmaTOF(track, o2::track::PID::Proton), trackCuts.getNsigmaTPC(track, o2::track::PID::Pion), trackCuts.getNsigmaTOF(track, o2::track::PID::Pion), trackCuts.getNsigmaTPC(track, o2::track::PID::Kaon), trackCuts.getNsigmaTOF(track, o2::track::PID::Kaon))) {
-            continue;
-          }
-          if (ConfTrackIsRejected) {
-            if (isParticleNSigmaRejected(track.p(), trackCuts.getNsigmaTPC(track, o2::track::PID::Proton), trackCuts.getNsigmaTOF(track, o2::track::PID::Proton), trackCuts.getNsigmaTPC(track, o2::track::PID::Pion), trackCuts.getNsigmaTOF(track, o2::track::PID::Pion), trackCuts.getNsigmaTPC(track, o2::track::PID::Kaon), trackCuts.getNsigmaTOF(track, o2::track::PID::Kaon))) {
-              continue;
-            }
-          }
-        }
-
-        if (ConfCPRIsEnabled) {
-          if (pairCloseRejection.isClosePair(track, phicandidate, parts, magFieldTesla1, femto_universe_container::EventType::mixed)) {
-            continue;
-          }
-        }
-
-        weight = efficiencyCalculator.getWeight(ParticleNo::ONE, phicandidate.pt()) * efficiencyCalculator.getWeight(ParticleNo::TWO, track.pt());
-
-        if constexpr (std::is_same<PartType, FemtoRecoParticles>::value)
-          mixedEventCont.setPair<true>(track, phicandidate, multCol, ConfUse3D, weight);
-        else
-          mixedEventCont.setPair<false>(track, phicandidate, multCol, ConfUse3D, weight);
-      }
-    };
-
-    for (const auto& [collision1, collision2] : soa::selfCombinations(colBinning, ConfNEventsMix, -1, cols, cols)) {
-      mixedCollProcessFunc(collision1, collision2);
-      mixQaRegistry.fill(HIST("MixingQA/hMECollisionBins"), colBinning.getBin({collision1.posZ(), collision1.multNtr()}));
+      doMixedEvent<false>(groupPartsTrack, groupPartsPhi, parts, magFieldTesla1, multiplicityCol);
     }
-  }
-
-  void processMixedEvent(FilteredFDCollisions const& cols, FilteredFemtoFullParticles const& parts)
-  {
-    doMixedEvent(cols, parts, partsPhi, partsTrack);
   }
   PROCESS_SWITCH(FemtoUniversePairTaskTrackPhi, processMixedEvent, "Enable processing mixed events", true);
 
   ///--------------------------------------------MC-------------------------------------------------///
   void processSameEventMCReco(FilteredFDCollision const& col, FemtoRecoParticles const& parts, aod::FdMCParticles const& mcparts)
   {
+    eventHisto.fillQA(col);
+    // Reco
     auto thegroupPartsTrack = partsTrackMCReco->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
     auto thegroupPartsPhi = partsPhiMCReco->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
-    // auto thegroupPartsPhiDaugh = partsPhiDaugh->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
-    // auto thegroupPartsKaons = partsKaons->sliceByCached(aod::femtouniverseparticle::fdCollisionId, col.globalIndex(), cache);
-
-    doSameEvent(col, parts, thegroupPartsTrack, thegroupPartsPhi, mcparts);
+    doSameEvent<true>(thegroupPartsTrack, thegroupPartsPhi, parts, col.magField(), col.multNtr(), mcparts);
   }
   PROCESS_SWITCH(FemtoUniversePairTaskTrackPhi, processSameEventMCReco, "Enable processing same event for MC Reco", true);
 
   void processMixedEventMCReco(FilteredFDCollisions const& cols, FemtoRecoParticles const& parts, aod::FdMCParticles const& mcparts)
   {
-    doMixedEvent(cols, parts, partsPhiMCReco, partsTrackMCReco, mcparts);
+    for (auto const& [collision1, collision2] : soa::selfCombinations(colBinning, 5, -1, cols, cols)) {
+
+      const int multiplicityCol = collision1.multNtr();
+      mixQaRegistry.fill(HIST("MixingQA/hMECollisionBins"), colBinning.getBin({collision1.posZ(), multiplicityCol}));
+
+      const auto& magFieldTesla1 = collision1.magField();
+      const auto& magFieldTesla2 = collision2.magField();
+
+      if (magFieldTesla1 != magFieldTesla2) {
+        continue;
+      }
+
+      auto groupPartsTrack = partsTrackMCReco->sliceByCached(aod::femtouniverseparticle::fdCollisionId, collision2.globalIndex(), cache);
+      auto groupPartsPhi = partsPhiMCReco->sliceByCached(aod::femtouniverseparticle::fdCollisionId, collision1.globalIndex(), cache);
+
+      doMixedEvent<true>(groupPartsTrack, groupPartsPhi, parts, magFieldTesla1, multiplicityCol, mcparts);
+    }
   }
   PROCESS_SWITCH(FemtoUniversePairTaskTrackPhi, processMixedEventMCReco, "Enable processing mixed events for MC Reco", false);
 
@@ -696,6 +711,10 @@ struct FemtoUniversePairTaskTrackPhi {
       const auto& pdgParticle = pdgMC->GetParticle(pdgCode);
       if (!pdgParticle) {
         continue;
+      }
+
+      if (pdgCode == ConfTrackPDGCode) {
+        effCorrection.fillTruthHist<ParticleNo::TWO, FilteredFDCollisions>(part);
       }
 
       // charge +
@@ -715,6 +734,7 @@ struct FemtoUniversePairTaskTrackPhi {
       if (pdgCode == 333) {
         registryMCtruth.fill(HIST("MCtruthPhi"), part.pt(), part.eta());
         registryMCtruth.fill(HIST("MCtruthPhiPt"), part.pt());
+        effCorrection.fillTruthHist<ParticleNo::ONE, FilteredFDCollisions>(part);
         continue;
       }
 
@@ -746,12 +766,12 @@ struct FemtoUniversePairTaskTrackPhi {
 
       if (mcpart.pdgMCTruth() == ConfTrackPDGCode && (part.pt() > ConfTrackPtLow) && (part.pt() < ConfTrackPtHigh) && isParticleNSigmaAccepted(part.p(), trackCuts.getNsigmaTPC(part, o2::track::PID::Proton), trackCuts.getNsigmaTOF(part, o2::track::PID::Proton), trackCuts.getNsigmaTPC(part, o2::track::PID::Pion), trackCuts.getNsigmaTOF(part, o2::track::PID::Pion), trackCuts.getNsigmaTPC(part, o2::track::PID::Kaon), trackCuts.getNsigmaTOF(part, o2::track::PID::Kaon))) {
         registryMCpT.fill(HIST("MCReco/NC_p_pT"), part.pt());
-        float weightTrack = efficiencyCalculator.getWeight(ParticleNo::TWO, part.pt());
+        float weightTrack = effCorrection.getWeight<FilteredFDCollisions>(ParticleNo::TWO, part);
         registryMCpT.fill(HIST("MCReco/C_p_pT"), part.pt(), weightTrack);
       }
       if ((mcpart.pdgMCTruth() == 333) && (part.partType() == aod::femtouniverseparticle::ParticleType::kPhi) && (part.pt() > ConfPhiPtLow) && (part.pt() < ConfPhiPtHigh)) {
         registryMCpT.fill(HIST("MCReco/NC_phi_pT"), part.pt());
-        float weightPhi = efficiencyCalculator.getWeight(ParticleNo::ONE, part.pt());
+        float weightPhi = effCorrection.getWeight<FilteredFDCollisions>(ParticleNo::ONE, part);
         registryMCpT.fill(HIST("MCReco/C_phi_pT"), part.pt(), weightPhi);
       }
 
@@ -774,7 +794,6 @@ struct FemtoUniversePairTaskTrackPhi {
             registryMCreco.fill(HIST("MCrecoPnegPt"), mcpart.pt());
           }
         }
-
       } // partType kTrack
     }
   }

@@ -13,28 +13,28 @@
 /// \brief basic per run check of the ITS dead chips and of the hadronic interaction rate
 /// \author victor.gonzalez.sebastian@gmail.com
 
-#include <array>
-#include <cmath>
-#include <unordered_map>
-#include <memory>
-#include <vector>
+#include "PWGCF/DataModel/DptDptFiltered.h"
+#include "PWGCF/TableProducer/dptDptFilter.h"
 
-#include "CCDB/BasicCCDBManager.h"
 #include "Common/CCDB/ctpRateFetcher.h"
 
-#include "DataFormatsParameters/AggregatedRunInfo.h"
+#include "CCDB/BasicCCDBManager.h"
 #include "DataFormatsITSMFT/NoiseMap.h" // missing include in TimeDeadMap.h
 #include "DataFormatsITSMFT/TimeDeadMap.h"
-#include "ITSMFTReconstruction/ChipMappingITS.h"
-
+#include "DataFormatsParameters/AggregatedRunInfo.h"
+#include "Framework/ASoAHelpers.h"
 #include "Framework/AnalysisDataModel.h"
 #include "Framework/AnalysisTask.h"
-#include "Framework/ASoAHelpers.h"
 #include "Framework/HistogramRegistry.h"
 #include "Framework/runDataProcessing.h"
+#include "ITSMFTReconstruction/ChipMappingITS.h"
 
-#include "PWGCF/DataModel/DptDptFiltered.h"
-#include "PWGCF/TableProducer/dptdptfilter.h"
+#include <array>
+#include <cmath>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 using namespace o2;
 using namespace o2::framework;
@@ -63,6 +63,8 @@ struct DptDptPerRunQc {
 
   ctpRateFetcher mRateFetcher;
   HistogramRegistry mHistos{"PerRunQaHistograms", {}, OutputObjHandlingPolicy::AnalysisObject};
+
+  Configurable<std::string> cfgInteractionRateSource{"cfgInteractionRateSource", "ZNC hadronic", "The shource for the interaction rate measure.PbPb:ZNC hadronic;pp:T0VTX.Default:ZNC hadronic"};
 
   void initCCDB(aod::BCsWithTimestamps::iterator const& bc)
   {
@@ -99,9 +101,9 @@ struct DptDptPerRunQc {
         gCurrentCollisionOrbitBefore = nullptr;
         gCurrentCollisionOrbitAfter = nullptr;
       }
+      LOGF(info, "Run number: %d, SOR: %lld, EOR: %lld, prev SOR: %lld, prev EOR: %lld, SOR seconds: %f", mRunNumber, tsSOR, tsEOR, mSOR, runDuration.second, mMinSeconds);
     }
     gCurrentHadronicRate = gHadronicRate[mRunNumber];
-    LOGF(info, "Getting out");
   }
 
   void init(o2::framework::InitContext&)
@@ -125,7 +127,7 @@ struct DptDptPerRunQc {
       return;
     }
 
-    double hadronicRate = mRateFetcher.fetch(ccdb.service, bc.timestamp(), mRunNumber, "T0VTX") * 1.e-3; //
+    double hadronicRate = mRateFetcher.fetch(ccdb.service, bc.timestamp(), mRunNumber, cfgInteractionRateSource) * 1.e-3; //
     double seconds = bc.timestamp() * 1.e-3 - mMinSeconds;
     gCurrentHadronicRate->Fill(seconds, hadronicRate);
     gCurrentCollisionOrbitAfter->Fill(orbit);

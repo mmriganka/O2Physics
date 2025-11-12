@@ -17,10 +17,18 @@
 #ifndef PWGJE_CORE_JETDERIVEDDATAUTILITIES_H_
 #define PWGJE_CORE_JETDERIVEDDATAUTILITIES_H_
 
-#include <vector>
-#include <string>
-#include "Common/CCDB/TriggerAliases.h"
 #include "Common/CCDB/EventSelectionParams.h"
+#include "Common/CCDB/RCTSelectionFlags.h"
+#include "Common/CCDB/TriggerAliases.h"
+
+#include <Rtypes.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace jetderiveddatautilities
 {
@@ -46,9 +54,14 @@ enum JCollisionSubGeneratorId {
 };
 
 template <typename T>
-bool selectCollision(T const& collision, std::vector<int> eventSelectionMaskBits, bool skipMBGapEvents = true)
+bool selectCollision(T const& collision, const std::vector<int>& eventSelectionMaskBits, bool skipMBGapEvents = true, bool rctSelection = true, std::string rctLabel = "CBT_hadronPID", bool rejectLimitedAcceptanceRct = false, bool requireZDCRct = false)
 {
   if (skipMBGapEvents && collision.subGeneratorId() == JCollisionSubGeneratorId::mbGap) {
+    return false;
+  }
+  o2::aod::rctsel::RCTFlagsChecker rctChecker;
+  rctChecker.init(rctLabel, requireZDCRct, rejectLimitedAcceptanceRct);
+  if (rctSelection && !rctChecker.checkTable(collision)) { // CBT_hadronPID given as default so that TOF is included in RCT selection to benefit from better timing for tracks. Impact of this for inclusive jets should be studied
     return false;
   }
   if (eventSelectionMaskBits.size() == 0) {
@@ -62,7 +75,7 @@ bool selectCollision(T const& collision, std::vector<int> eventSelectionMaskBits
   return true;
 }
 
-bool eventSelectionMasksContainSelection(std::string eventSelectionMasks, std::string selection)
+bool eventSelectionMasksContainSelection(const std::string& eventSelectionMasks, std::string selection)
 {
   size_t position = 0;
   while ((position = eventSelectionMasks.find(selection, position)) != std::string::npos) {
@@ -76,7 +89,7 @@ bool eventSelectionMasksContainSelection(std::string eventSelectionMasks, std::s
   return false;
 }
 
-std::vector<int> initialiseEventSelectionBits(std::string eventSelectionMasks)
+std::vector<int> initialiseEventSelectionBits(const std::string& eventSelectionMasks)
 {
   std::vector<int> eventSelectionMaskBits;
   if (eventSelectionMasksContainSelection(eventSelectionMasks, "sel8")) {
@@ -153,9 +166,9 @@ uint16_t setEventSelectionBit(T const& collision)
   if (collision.sel7()) {
     SETBIT(bit, JCollisionSel::sel7);
   }
-    if (collision.alias_bit(kINT7)) {
-      SETBIT(bit, JCollisionSel::selKINT7);
-    }
+  if (collision.alias_bit(kINT7)) {
+    SETBIT(bit, JCollisionSel::selKINT7);
+  }
   if (collision.selection_bit(o2::aod::evsel::kIsTriggerTVX)) {
     SETBIT(bit, JCollisionSel::selTVX);
   }
@@ -223,7 +236,7 @@ enum JTrigSel {
 };
 
 template <typename T>
-bool selectTrigger(T const& collision, std::vector<int> triggerMaskBits)
+bool selectTrigger(T const& collision, const std::vector<int>& triggerMaskBits)
 {
   if (triggerMaskBits.size() == 0) {
     return true;
@@ -245,7 +258,7 @@ bool selectTrigger(T const& collision, int triggerMaskBit)
   return collision.triggerSel() & (1 << triggerMaskBit);
 }
 
-bool triggerMasksContainTrigger(std::string triggerMasks, std::string trigger)
+bool triggerMasksContainTrigger(const std::string& triggerMasks, std::string trigger)
 {
   size_t position = 0;
   while ((position = triggerMasks.find(trigger, position)) != std::string::npos) {
@@ -259,7 +272,7 @@ bool triggerMasksContainTrigger(std::string triggerMasks, std::string trigger)
   return false;
 }
 
-std::vector<int> initialiseTriggerMaskBits(std::string triggerMasks)
+std::vector<int> initialiseTriggerMaskBits(const std::string& triggerMasks)
 {
   std::vector<int> triggerMaskBits;
   if (triggerMasksContainTrigger(triggerMasks, "fJetChLowPt")) {
@@ -328,7 +341,7 @@ std::vector<int> initialiseTriggerMaskBits(std::string triggerMasks)
   return triggerMaskBits;
 }
 
-uint64_t setTriggerSelectionBit(std::vector<bool> triggerDecisions)
+uint64_t setTriggerSelectionBit(const std::vector<bool>& triggerDecisions)
 {
   uint64_t bit = 0;
   for (std::vector<bool>::size_type i = 0; i < triggerDecisions.size(); i++) {
@@ -356,7 +369,7 @@ bool selectChargedTrigger(T const& collision, int triggerSelection)
   return (collision.chargedTriggerSel() & (1 << triggerSelection));
 }
 
-int initialiseChargedTriggerSelection(std::string triggerSelection)
+int initialiseChargedTriggerSelection(const std::string& triggerSelection)
 {
   if (triggerSelection == "jetChLowPt") {
     return JTrigSelCh::jetChLowPt;
@@ -421,7 +434,7 @@ bool selectFullTrigger(T const& collision, int triggerSelection)
   return (collision.fullTriggerSel() & (1 << triggerSelection));
 }
 
-int initialiseFullTriggerSelection(std::string triggerSelection)
+int initialiseFullTriggerSelection(const std::string& triggerSelection)
 {
   if (triggerSelection == "emcalReadout") {
     return JTrigSelFull::emcalReadout;
@@ -516,7 +529,7 @@ bool selectChargedHFTrigger(T const& collision, int triggerSelection)
   return (collision.chargedHFTriggerSel() & (1 << triggerSelection));
 }
 
-int initialiseChargedHFTriggerSelection(std::string triggerSelection)
+int initialiseChargedHFTriggerSelection(const std::string& triggerSelection)
 {
   if (triggerSelection == "jetD0ChLowPt") {
     return JTrigSelChHF::jetD0ChLowPt;
@@ -579,7 +592,7 @@ bool selectTrack(T const& track, int trackSelection)
   return (track.trackSel() & (1 << trackSelection));
 }
 
-int initialiseTrackSelection(std::string trackSelection)
+int initialiseTrackSelection(const std::string& trackSelection)
 {
   if (trackSelection == "globalTracks") {
     return JTrackSel::globalTrack;
